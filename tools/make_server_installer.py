@@ -48,18 +48,19 @@ echo '__PAGE__' | base64 -d > /opt/alex-share/page.html
 chmod 644 /opt/alex-share/*
 
 if [ ! -f /etc/alex-share.env ]; then
-  TOKEN=$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')
   cat > /etc/alex-share.env <<EOF
-ALEX_TOKEN=$TOKEN
 ALEX_DATA=/var/lib/alex-share
 ALEX_BIND=127.0.0.1:8080
 ALEX_MAX_MB=1024
 ALEX_QUOTA_GB=20
+ALEX_DEVICE_GB=3
 ALEX_TTL_HOURS=24
+ALEX_REG_PER_DAY=10
 EOF
   chmod 600 /etc/alex-share.env
 fi
-TOKEN=$(grep '^ALEX_TOKEN=' /etc/alex-share.env | cut -d= -f2-)
+# v2 uses device accounts; the old shared token is no longer needed
+sed -i '/^ALEX_TOKEN=/d' /etc/alex-share.env
 
 cat > /etc/systemd/system/alex-share.service <<'EOF'
 [Unit]
@@ -127,9 +128,9 @@ echo
 if [ "${ok:-}" = 1 ]; then echo "Máy chủ đã chạy."; else echo "Máy chủ đã cài nhưng HTTPS chưa sẵn sàng (kiểm tra cổng 80/443 có mở ở tường lửa nhà cung cấp không)."; fi
 echo "----------------------------------------------"
 echo " Địa chỉ máy chủ : https://$DOMAIN"
-echo " Mã truy cập     : $TOKEN"
 echo "----------------------------------------------"
-echo "Nhập hai dòng trên vào Alex: tab Gửi > Qua Internet > Cài đặt máy chủ."
+echo "Nhập địa chỉ này vào Alex (tab Gửi > Qua Internet). Alex tự tạo ID và mật khẩu cho mỗi máy;"
+echo "điện thoại kết nối bằng ID + mật khẩu đó trên web Alex."
 '''
 script = script.replace("__PY__", py).replace("__PAGE__", page)
 out = srv / "install.sh"

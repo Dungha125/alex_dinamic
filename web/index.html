@@ -31,21 +31,30 @@
     <p class="sub">Mã hoá ngay trên điện thoại rồi mới tải lên. Người nhận dùng mã 6 số, link hoặc QR.</p>
 
     <div class="card" id="sendForm">
+      <div class="targets" id="targets"></div>
       <div class="pick">
         <label><input type="file" id="pickMedia" accept="image/*,video/*" multiple><div class="ico">🖼</div><span>Ảnh, video</span><small>Từ thư viện</small></label>
         <label><input type="file" id="pickFile" multiple><div class="ico">📄</div><span>File</span><small>Tài liệu, mọi loại</small></label>
         <label><input type="file" id="pickCamera" accept="image/*" capture="environment"><div class="ico">📷</div><span>Chụp ảnh</span><small>Mở camera</small></label>
         <button class="tile" id="pickText" type="button"><div class="ico">✍</div><span style="font-weight:600;font-size:15px">Gõ chữ</span><small style="color:var(--dim);font-size:12px;margin-top:-4px">Gửi một đoạn chữ</small></button>
+        <button class="tile wide" id="pickQr" type="button"><div class="ico">⌗</div><span style="font-weight:600;font-size:15px">Quét QR / gửi link</span><small style="color:var(--dim);font-size:12px;margin-top:-4px">Mở link trên máy tính bằng một chạm</small></button>
       </div>
       <textarea id="textBox" class="hidden mt" rows="4" placeholder="Nhập chữ cần gửi…"></textarea>
       <div class="queue" id="queue"></div>
-      <div class="switch">
+      <div class="switch" id="codeSwitch">
         <div>Kèm mã 6 số<small>Tiện để nhập tay. Máy chủ của bạn giữ khoá cho file này.</small></div>
         <label class="toggle"><input type="checkbox" id="withCode" checked><i></i></label>
       </div>
       <button class="btn mt" id="sendBtn" disabled>Tải lên</button>
       <div class="bar hidden" id="sendBar"><i id="sendFill"></i></div>
       <div class="msg" id="sendMsg"></div>
+    </div>
+
+    <div class="card result hidden" id="sentPc">
+      <div class="ico" style="margin:4px auto 10px;width:48px;height:48px;border-radius:14px;font-size:24px">✓</div>
+      <h2 id="sentPcTitle" style="color:var(--text);font-size:17px">Đã gửi</h2>
+      <p class="sub" id="sentPcSub" style="margin:0"></p>
+      <button class="btn small mt" id="sentPcMore" style="margin-left:auto;margin-right:auto">Gửi tiếp</button>
     </div>
 
     <div class="card result hidden" id="sendResult">
@@ -69,6 +78,10 @@
   <section id="page-recv" class="hidden">
     <h1>Nhận</h1>
     <p class="sub">Nhập mã 6 số hoặc dán link người gửi đưa cho bạn.</p>
+    <div class="card hidden" id="outboxCard">
+      <h2>Từ máy tính</h2>
+      <div class="hist" id="outbox"></div>
+    </div>
     <div class="card" id="recvForm">
       <input class="code" id="codeInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
       <button class="btn mt" id="recvBtn" disabled>Nhận</button>
@@ -99,16 +112,20 @@
 
   <!-- ======================= SETTINGS ======================= -->
   <section id="page-set" class="hidden">
-    <h1>Cài đặt</h1>
+    <h1>Máy tính</h1>
+    <p class="sub">Kết nối bằng ID và mật khẩu hiện trong Alex trên máy tính. Kết nối được nhiều máy.</p>
     <div class="card">
-      <h2>Mã truy cập máy chủ</h2>
-      <p class="sub" style="margin-bottom:10px">Cần để tải lên. Nhận file thì không cần. Lấy mã ở máy chủ (/etc/alex-share.env) hoặc trong Alex trên máy tính.</p>
-      <input class="field" id="tokenInput" type="password" autocomplete="off" placeholder="Dán mã truy cập">
-      <div class="row mt">
-        <button class="btn small" id="saveToken">Lưu & kiểm tra</button>
-        <button class="btn ghost small" id="showToken">Hiện</button>
+      <h2>Máy tính đã kết nối</h2>
+      <div class="hist" id="devices"></div>
+      <button class="btn ghost mt" id="addDevice">+ Kết nối máy tính</button>
+      <div id="addForm" class="hidden mt">
+        <p class="sub" style="margin-bottom:10px">Mở Alex trên máy tính → tab Gửi → mục Qua Internet để xem ID và mật khẩu.</p>
+        <input class="field" id="devId" inputmode="numeric" autocomplete="off" placeholder="ID (9 số)">
+        <input class="field mt" id="devPw" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Mật khẩu">
+        <input class="field mt" id="phoneName" autocomplete="off" placeholder="Tên điện thoại này (hiện trên máy tính)">
+        <button class="btn mt" id="connectBtn">Kết nối</button>
+        <div class="msg" id="connectMsg"></div>
       </div>
-      <div class="msg" id="tokenMsg"></div>
     </div>
     <div class="card install hidden" id="installCard">
       <div class="meta"><b>Cài lên màn hình chính</b><small>Mở nhanh như một ứng dụng.</small></div>
@@ -129,8 +146,23 @@
   <button data-page="send" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>Gửi</button>
   <button data-page="recv"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>Nhận</button>
   <button data-page="hist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Đã gửi</button>
-  <button data-page="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>Cài đặt</button>
+  <button data-page="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>Máy tính</button>
 </nav>
+<div class="sheet hidden" id="qrSheet">
+  <div class="sheet-card">
+    <div class="row" style="align-items:center"><h2 style="margin:0;flex:1">Quét QR</h2><button class="x" id="qrClose" aria-label="Đóng">×</button></div>
+    <div class="cam" id="qrCam"><video id="qrVideo" playsinline muted></video><div class="frame"></div></div>
+    <p class="sub hidden" id="qrNoScan" style="margin:10px 0 0">Trình duyệt này chưa quét QR trực tiếp được (iPhone). Quét bằng ứng dụng Camera rồi dán link vào ô dưới.</p>
+    <input class="field mt" id="qrText" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="…hoặc dán link vào đây">
+    <div class="targets mt" id="qrTargets"></div>
+    <button class="btn mt" id="qrSend">Gửi sang máy tính</button>
+    <div class="row mt">
+      <button class="btn ghost small" id="qrOpen">Mở trên điện thoại</button>
+      <button class="btn ghost small" id="qrCopy">Chép</button>
+    </div>
+    <div class="msg" id="qrMsg"></div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script src="config.js"></script>

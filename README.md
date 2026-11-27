@@ -19,6 +19,7 @@
 - **Vườn uống nước**: uống đủ cốc thì cây lớn rồi nở hoa, có chuỗi ngày.
 - Tự ẩn khi xem toàn màn hình / trình chiếu; không lọt vào ảnh chụp và chia sẻ màn hình; icon ở khay hệ thống (bấm trái để ẩn/hiện, bấm phải có menu: khởi động cùng Windows, thoát).
 
+- **Tài khoản máy tính**: Alex tự tạo một **ID 9 số + mật khẩu** trên máy chủ chia sẻ (tab Gửi → Qua Internet; có nút Hiện / Chép / Đổi mật khẩu, xem và ngắt các điện thoại đã kết nối). Điện thoại nhập ID + mật khẩu trên web để kết nối; một trình duyệt kết nối được nhiều máy. Điện thoại gửi thẳng file sang máy tính (Alex tự lưu vào `Downloads\Alex`), máy tính gửi sang điện thoại (hiện ở tab Nhận trên web). Đổi mật khẩu sẽ ngắt mọi điện thoại. Máy chủ giới hạn đăng ký theo IP, dung lượng mỗi máy, và khoá tạm khi nhập sai mật khẩu nhiều lần.
 - **Web cho điện thoại** (`web/`, deploy tại alex.tailieuptit.com): gửi ảnh/video/file/chữ từ điện thoại (mã hoá ngay trên máy), nhận bằng mã 6 số, link hoặc QR, lịch sử đã gửi, cài lên màn hình chính (PWA), tải Alex cho Windows. Hướng dẫn: `web/DEPLOY.md`.
 - **Tự cập nhật**: Alex kiểm tra `https://alex.tailieuptit.com/latest.json` (15 giây sau khi mở, rồi 6 giờ/lần). Chỉ nhận bản được ký bằng khoá phát hành (Ed25519) và đúng SHA-256; tự cài im lặng khi không dùng đảo hoặc bấm "Cập nhật ngay" ở tab Công cụ, rồi tự mở lại. Phát hành bản mới: `.\tools\release.ps1 -Version x.y.z -Notes "…" [-Publish]`.
 

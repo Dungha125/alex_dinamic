@@ -16,6 +16,18 @@ SITE_URL: "https://alex.tailieuptit.com",       // chính trang này (dùng tạ
 
 Máy chủ API phải có `https://alex.tailieuptit.com` trong `CORS_ORIGINS` (file `alex_share.py`, đã có sẵn).
 
+Web này cần **máy chủ API bản 2** (tài khoản ID + mật khẩu). Cập nhật server bằng file cài mới:
+
+```powershell
+scp E:\DEV\Alex\server\install.sh root@180.93.32.135:/root/
+```
+
+```powershell
+ssh root@180.93.32.135 "DOMAIN=api.alex.tailieuptit.com bash /root/install.sh"
+```
+
+Bản 2 lưu file trong thư mục con mới, nên các link/mã tạo bằng bản cũ sẽ không mở được nữa (vốn chỉ sống 24 giờ).
+
 ## 2. Bắt buộc HTTPS
 
 Mã hoá / giải mã dùng WebCrypto, trình duyệt chỉ cho chạy trên HTTPS.

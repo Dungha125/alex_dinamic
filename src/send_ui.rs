@@ -48,6 +48,45 @@ impl Alex {
             (g.me.clone(), g.listening, g.live_peers(), reqs, g.transfers.iter().take(6).cloned().collect::<Vec<_>>())
         };
 
+        // links sent from a phone (QR scan): open with one click
+        let mut done_link = None;
+        for (i, link) in self.links.clone().iter().enumerate() {
+            let web = (link.starts_with("https://") || link.starts_with("http://")) && !link.chars().any(|c| c.is_whitespace() || c == '"');
+            egui::Frame::new()
+                .fill(ACCENT.gamma_multiply(0.18))
+                .stroke(Stroke::new(1.0, ACCENT.gamma_multiply(0.7)))
+                .corner_radius(12)
+                .inner_margin(Margin::same(12))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new(if web { "Link từ điện thoại" } else { "Chữ từ điện thoại (mã QR)" }).small().color(DIM));
+                    ui.add(egui::Label::new(RichText::new(truncate(link, 160)).font(bold(13.5))).wrap());
+                    ui.horizontal(|ui| {
+                        if web {
+                            let open = egui::Button::new(RichText::new("Mở").font(bold(13.5)).color(Color32::WHITE)).fill(logo::C2).corner_radius(16);
+                            if ui.add(open).clicked() {
+                                sys::shell_open(link);
+                                done_link = Some(i);
+                            }
+                        }
+                        if ui.add(egui::Button::new("Chép").corner_radius(16)).clicked() {
+                            if let Some(cb) = self.cb.as_mut() {
+                                let _ = cb.set_text(link.clone());
+                            }
+                            self.toast(ui.input(|x| x.time), "Đã chép", "");
+                            done_link = Some(i);
+                        }
+                        if ui.add(egui::Button::new("Xong").corner_radius(16)).clicked() {
+                            done_link = Some(i);
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+        if let Some(i) = done_link {
+            self.links.remove(i);
+        }
+
         for (id, from, label, total, code) in requests {
             egui::Frame::new()
                 .fill(ACCENT.gamma_multiply(0.18))
@@ -230,61 +269,122 @@ impl Alex {
 
     fn tab_internet(&mut self, ui: &mut Ui) {
         ui.label(RichText::new("Qua Internet").color(DIM).small());
-        let view = self.share.lock().unwrap().view.clone();
-        let note = self.share.lock().unwrap().note.clone();
+        let (view, phones, registering) = {
+            let g = self.share.lock().unwrap();
+            (g.view.clone(), g.phones.as_ref().map(|p| p.iter().map(|x| (x.sid.clone(), x.name.clone(), x.last)).collect::<Vec<_>>()), g.registering)
+        };
         let busy = matches!(view, ShareView::Work { .. });
+        let has_account = self.account.lock().unwrap().is_some();
+        let now_t = ui.input(|i| i.time);
         card(ui, |ui| {
             if self.share_setup {
-                ui.label(RichText::new("Máy chủ của bạn").font(bold(14.0)));
-                ui.label(RichText::new("File được mã hoá trước khi rời máy. Nhập địa chỉ và mã truy cập rồi kiểm tra.").small().color(DIM));
+                ui.label(RichText::new("Máy chủ Alex").font(bold(14.0)));
+                ui.label(RichText::new("Nhập địa chỉ máy chủ. Alex tự tạo ID và mật khẩu cho máy này.").small().color(DIM));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.share_url_edit)
                         .hint_text("https://api.alex.tailieuptit.com")
                         .desired_width(ui.available_width())
                         .margin(Margin::symmetric(10, 6)),
                 );
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.share_token_edit)
-                        .hint_text("Mã truy cập")
-                        .password(true)
-                        .desired_width(ui.available_width())
-                        .margin(Margin::symmetric(10, 6)),
-                );
-                ui.add_space(2.0);
-                ui.add_enabled_ui(!busy, |ui| {
-                    let btn = egui::Button::new(RichText::new("Lưu & kiểm tra").font(bold(13.5)).color(Color32::WHITE))
-                        .fill(logo::C2)
-                        .corner_radius(16);
+                ui.horizontal(|ui| {
+                    let btn = egui::Button::new(RichText::new("Lưu").font(bold(13.5)).color(Color32::WHITE)).fill(logo::C2).corner_radius(16);
                     if ui.add(btn).clicked() {
                         self.share_save_check();
                     }
-                });
-            } else {
-                let host = self.data.settings.share_url.trim().trim_start_matches("https://").trim_start_matches("http://");
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("Máy chủ").small().color(DIM));
-                    ui.label(RichText::new(host).font(bold(13.0)));
-                    if !note.is_empty() {
-                        ui.label(RichText::new(&note).small().color(DIM));
+                    if !self.data.settings.share_url.is_empty() && ui.button("Huỷ").clicked() {
+                        self.share_setup = false;
                     }
+                });
+                return;
+            }
+
+            // ---------------------------------------------------------- this PC's account
+            if !has_account {
+                if registering {
+                    ui.label(RichText::new("Đang tạo tài khoản cho máy này…").color(DIM));
+                } else if let ShareView::Fail(e) = &view {
+                    ui.label(RichText::new(e).small().color(Color32::from_rgb(230, 80, 90)));
+                    if ui.button("Thử lại").clicked() {
+                        self.share.lock().unwrap().view = ShareView::Idle;
+                        self.share_register();
+                    }
+                }
+            } else {
+                let id = self.data.settings.device_id.clone();
+                let pw = self.data.settings.device_password.clone();
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("ID máy này").small().color(DIM));
+                        ui.label(RichText::new(share::pretty_id(&id)).font(bold(22.0)).color(logo::C1));
+                    });
+                    ui.add_space(14.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Mật khẩu").small().color(DIM));
+                        let shown = if self.show_pw { pw.clone() } else { "•••• ••••".into() };
+                        ui.label(RichText::new(shown).font(bold(22.0)));
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.small_button("Đổi").clicked() {
-                            self.share_url_edit = self.data.settings.share_url.clone();
-                            self.share_token_edit = self.data.settings.share_token.clone();
-                            self.share_setup = true;
+                        if ui.small_button("Đổi").on_hover_text("Tạo mật khẩu mới, các điện thoại phải kết nối lại").clicked() {
+                            self.share_change_password();
+                        }
+                        if ui.small_button(if self.show_pw { "Ẩn" } else { "Hiện" }).clicked() {
+                            self.show_pw = !self.show_pw;
+                        }
+                        if ui.small_button("Chép").clicked() {
+                            if let Some(cb) = self.cb.as_mut() {
+                                let _ = cb.set_text(format!("ID: {}\nMật khẩu: {pw}", share::pretty_id(&id)));
+                            }
+                            self.toast(now_t, "Đã chép ID và mật khẩu", "");
                         }
                     });
                 });
+                ui.label(RichText::new("Trên điện thoại mở alex.tailieuptit.com → Kết nối máy tính → nhập ID và mật khẩu.").small().color(DIM));
+
+                // connected phones
+                ui.horizontal(|ui| {
+                    match &phones {
+                        None => {
+                            if ui.small_button("Xem điện thoại đã kết nối").clicked() {
+                                self.share_load_phones();
+                            }
+                        }
+                        Some(list) => {
+                            ui.label(RichText::new(format!("{} điện thoại đã kết nối", list.len())).small().color(DIM));
+                            if ui.small_button("Làm mới").clicked() {
+                                self.share_load_phones();
+                            }
+                        }
+                    }
+                });
+                if let Some(list) = &phones {
+                    for (sid, name, last) in list {
+                        ui.horizontal(|ui| {
+                            let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) - last;
+                            let when = if secs < 120.0 { "vừa dùng".to_string() } else if secs < 86400.0 { format!("{} giờ trước", (secs / 3600.0).ceil()) } else { format!("{} ngày trước", (secs / 86400.0).floor()) };
+                            ui.label(RichText::new(format!("📱 {name}")).small());
+                            ui.label(RichText::new(when).small().color(DIM));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.small_button("Ngắt").clicked() {
+                                    self.share_disconnect(sid.clone());
+                                }
+                            });
+                        });
+                    }
+                }
+                ui.add_space(6.0);
+
+                // ------------------------------------------------------ send
                 if self.send_queue.is_empty() {
-                    ui.label(RichText::new("Thả file hoặc thư mục lên đảo để tải lên lấy link.").small().color(DIM));
+                    ui.label(RichText::new("Thả file lên đảo để gửi sang điện thoại hoặc lấy link. File từ điện thoại gửi sang tự lưu vào Downloads\\Alex.").small().color(DIM));
                 } else {
                     ui.add_enabled_ui(!busy, |ui| {
                         ui.horizontal(|ui| {
-                            let btn = egui::Button::new(RichText::new("Tải lên lấy link").font(bold(13.5)).color(Color32::WHITE))
-                                .fill(logo::C2)
-                                .corner_radius(16);
-                            if ui.add(btn).clicked() {
-                                self.share_upload();
+                            let to_phone = egui::Button::new(RichText::new("Gửi sang điện thoại").font(bold(13.5)).color(Color32::WHITE)).fill(logo::C2).corner_radius(16);
+                            if ui.add(to_phone).clicked() {
+                                self.share_upload(true);
+                            }
+                            if ui.add(egui::Button::new(RichText::new("Tải lên lấy link").font(bold(13.0))).corner_radius(16)).clicked() {
+                                self.share_upload(false);
                             }
                             let mut with_code = self.data.settings.share_with_code;
                             if ui.checkbox(&mut with_code, "Kèm mã 6 số").changed() {
@@ -293,13 +393,6 @@ impl Alex {
                             }
                         });
                     });
-                    if self.data.settings.share_with_code {
-                        ui.label(
-                            RichText::new("Chế độ mã 6 số: máy chủ của bạn giữ được khoá giải mã. Link thường thì khoá chỉ nằm sau dấu #, máy chủ không thấy.")
-                                .small()
-                                .color(Color32::from_rgb(230, 186, 90)),
-                        );
-                    }
                 }
             }
 
@@ -311,68 +404,60 @@ impl Alex {
                     ui.label(RichText::new(format!("{} / {}", net::human(*done), net::human(*total))).small().color(DIM));
                 }
             }
-
+            if let ShareView::Phones { hours } = &view {
+                ui.label(RichText::new(format!("Đã gửi. Mở tab Nhận trên web Alex ở điện thoại để tải (giữ {:.0} giờ).", hours.max(1.0))).small().color(Color32::from_rgb(60, 210, 130)));
+            }
             if let ShareView::Sent { link, code, hours } = &view {
                 ui.add_space(6.0);
                 ui.label(RichText::new("Link (đã chép vào clipboard)").small().color(DIM));
                 let mut shown = link.clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut shown)
-                        .desired_width(ui.available_width() - 72.0)
-                        .margin(Margin::symmetric(8, 4))
-                        .interactive(false),
-                );
+                ui.add(egui::TextEdit::singleline(&mut shown).desired_width(ui.available_width() - 72.0).margin(Margin::symmetric(8, 4)).interactive(false));
                 if ui.button("Chép link").clicked() {
                     if let Some(cb) = self.cb.as_mut() {
                         if cb.set_text(link.clone()).is_ok() {
-                            self.toast(ui.input(|i| i.time), "Đã chép link", "");
+                            self.toast(now_t, "Đã chép link", "");
                         }
                     }
                 }
                 if let Some(code) = code {
-                    ui.add_space(4.0);
                     ui.label(RichText::new("Mã 6 số").small().color(DIM));
                     ui.label(RichText::new(code).font(bold(28.0)).color(logo::C1));
-                    ui.label(RichText::new("Người nhận nhập mã này trên trang web hoặc trong Alex.").small().color(DIM));
                 }
-                let exp = if *hours >= 1.0 {
-                    format!("Hết hạn sau khoảng {:.0} giờ", hours)
-                } else {
-                    "Hết hạn trong vòng 1 giờ".into()
-                };
-                ui.label(RichText::new(exp).small().color(DIM));
+                ui.label(RichText::new(if *hours >= 1.0 { format!("Hết hạn sau khoảng {:.0} giờ", hours) } else { "Hết hạn trong vòng 1 giờ".into() }).small().color(DIM));
             }
-
-            if let ShareView::Fail(e) = &view {
+            if let (true, ShareView::Fail(e)) = (has_account, &view) {
                 ui.add_space(4.0);
                 ui.label(RichText::new(e).small().color(Color32::from_rgb(230, 80, 90)));
             }
 
-            if !self.share_setup {
-                ui.add_space(8.0);
-                ui.label(RichText::new("Nhận bằng mã hoặc link").small().color(DIM));
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.share_in)
-                            .hint_text("123456 hoặc https://…/s/…#khoá")
-                            .desired_width(ui.available_width() - 78.0)
-                            .margin(Margin::symmetric(10, 6)),
-                    );
-                    ui.add_enabled_ui(!busy, |ui| {
-                        if ui.button("Nhận").clicked() {
-                            self.share_receive();
-                        }
-                    });
-                });
-                if let ShareView::Saved { name } = &view {
-                    ui.label(RichText::new(format!("Đã lưu {name}")).small().color(Color32::from_rgb(60, 210, 130)));
-                    if ui.button("Mở thư mục").clicked() {
-                        let d = net::downloads_dir();
-                        let _ = std::fs::create_dir_all(&d);
-                        sys::shell_open(&d.display().to_string());
+            // ---------------------------------------------------------- receive by code / link
+            ui.add_space(8.0);
+            ui.label(RichText::new("Nhận bằng mã hoặc link").small().color(DIM));
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.share_in).hint_text("123456 hoặc link").desired_width(ui.available_width() - 78.0).margin(Margin::symmetric(10, 6)));
+                ui.add_enabled_ui(!busy, |ui| {
+                    if ui.button("Nhận").clicked() {
+                        self.share_receive();
                     }
+                });
+            });
+            if let ShareView::Saved { name } = &view {
+                ui.label(RichText::new(format!("Đã lưu {name}")).small().color(Color32::from_rgb(60, 210, 130)));
+                if ui.button("Mở thư mục").clicked() {
+                    let d = net::downloads_dir();
+                    let _ = std::fs::create_dir_all(&d);
+                    sys::shell_open(&d.display().to_string());
                 }
             }
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let host = self.data.settings.share_url.trim().trim_start_matches("https://").trim_start_matches("http://").to_string();
+                ui.label(RichText::new(format!("Máy chủ: {host}")).small().color(DIM));
+                if ui.small_button("Đổi").clicked() {
+                    self.share_url_edit = self.data.settings.share_url.clone();
+                    self.share_setup = true;
+                }
+            });
         });
     }
 }

@@ -164,14 +164,140 @@ fn encrypted_len(meta_len: usize, size: u64) -> u64 {
     MAGIC.len() as u64 + (4 + meta_len + TAG) as u64 + frames * (4 + TAG) as u64 + size
 }
 
-/// Checks the server address and token. Returns the max upload size.
-pub fn ping(url: &str, token: &str) -> Result<u64, String> {
-    let r = agent().get(&format!("{}/api/ping", base(url))).set("X-Alex-Token", token).call().map_err(err_of)?;
-    let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
-    if !v["auth"].as_bool().unwrap_or(false) {
-        return Err("Máy chủ chạy, nhưng mã truy cập không đúng".into());
+/// This PC's account on the share server (ID + private device secret).
+#[derive(Clone)]
+pub struct Account {
+    pub url: String,
+    pub id: String,
+    pub secret: String,
+}
+
+impl Account {
+    fn auth(&self) -> String {
+        format!("Device {}:{}", self.id, self.secret)
+    }
+    fn api(&self, path: &str) -> String {
+        format!("{}{path}", base(&self.url))
+    }
+}
+
+/// "249791575" -> "249 791 575"
+pub fn pretty_id(id: &str) -> String {
+    id.as_bytes().chunks(3).map(|c| String::from_utf8_lossy(c).into_owned()).collect::<Vec<_>>().join(" ")
+}
+
+/// Registers this PC. Returns (id, secret, password).
+pub fn register(url: &str, name: &str) -> Result<(String, String, String), String> {
+    let v: serde_json::Value = agent()
+        .post(&format!("{}/api/device/register", base(url)))
+        .send_json(serde_json::json!({ "name": name }))
+        .map_err(err_of)?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    let s = |k: &str| v[k].as_str().map(str::to_string).ok_or_else(|| "Máy chủ trả dữ liệu lạ (cần máy chủ Alex bản mới)".to_string());
+    Ok((s("id")?, s("secret")?, s("password")?))
+}
+
+/// Checks the account. Returns the max upload size.
+#[allow(dead_code)]
+pub fn ping(acc: &Account) -> Result<u64, String> {
+    let v: serde_json::Value = agent().get(&acc.api("/api/ping")).set("Authorization", &acc.auth()).call().map_err(err_of)?.into_json().map_err(|e| e.to_string())?;
+    if v["auth"].as_str() != Some("device") {
+        return Err("Máy chủ không nhận tài khoản của máy này".into());
     }
     Ok(v["max_bytes"].as_u64().unwrap_or(0))
+}
+
+/// New password (None = let the server pick one). Every connected phone is signed out.
+pub fn set_password(acc: &Account, pw: Option<&str>) -> Result<String, String> {
+    let v: serde_json::Value = agent()
+        .post(&acc.api("/api/device/password"))
+        .set("Authorization", &acc.auth())
+        .send_json(serde_json::json!({ "password": pw.unwrap_or("") }))
+        .map_err(err_of)?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    v["password"].as_str().map(str::to_string).ok_or_else(|| "Máy chủ trả dữ liệu lạ".into())
+}
+
+pub struct Phone {
+    pub sid: String,
+    pub name: String,
+    pub last: f64,
+}
+
+pub fn phones(acc: &Account) -> Result<Vec<Phone>, String> {
+    let v: serde_json::Value = agent().get(&acc.api("/api/device/sessions")).set("Authorization", &acc.auth()).call().map_err(err_of)?.into_json().map_err(|e| e.to_string())?;
+    Ok(v["sessions"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|s| Phone {
+                    sid: s["sid"].as_str().unwrap_or("").into(),
+                    name: s["name"].as_str().unwrap_or("Điện thoại").into(),
+                    last: s["last"].as_f64().unwrap_or(0.0),
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn disconnect_phone(acc: &Account, sid: &str) -> Result<(), String> {
+    agent().delete(&acc.api(&format!("/api/device/sessions/{sid}"))).set("Authorization", &acc.auth()).call().map_err(err_of)?;
+    Ok(())
+}
+
+pub struct InboxItem {
+    pub id: String,
+    pub key: String,
+    pub label: String,
+    #[allow(dead_code)]
+    pub size: u64,
+}
+
+/// Waits up to `secs` for files a phone sent to this PC.
+pub fn wait_inbox(acc: &Account, secs: u32) -> Result<Vec<InboxItem>, String> {
+    let a = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10)).timeout_read(Duration::from_secs(secs as u64 + 20)).build();
+    let v: serde_json::Value = a
+        .get(&acc.api(&format!("/api/inbox?wait={secs}")))
+        .set("Authorization", &acc.auth())
+        .call()
+        .map_err(err_of)?
+        .into_json()
+        .map_err(|e| e.to_string())?;
+    Ok(v["items"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|x| InboxItem {
+                    id: x["id"].as_str().unwrap_or("").into(),
+                    key: x["key"].as_str().unwrap_or("").into(),
+                    label: x["label"].as_str().unwrap_or("file").into(),
+                    size: x["size"].as_u64().unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+pub fn ack(acc: &Account, id: &str) -> Result<(), String> {
+    agent().post(&acc.api(&format!("/api/inbox/{id}/ack"))).set("Authorization", &acc.auth()).call().map_err(err_of)?;
+    Ok(())
+}
+
+/// Downloads + decrypts one inbox item into `dir`.
+pub fn fetch_item(acc: &Account, item: &InboxItem, dir: &Path, progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
+    fetch(&base(&acc.url), &item.id, &item.key, dir, progress)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Mode {
+    /// key only in the link (#fragment)
+    Link,
+    /// also a 6-digit code (key kept on the server)
+    Code,
+    /// to every phone connected to this PC
+    Phones,
 }
 
 fn collect(path: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
@@ -189,7 +315,8 @@ fn collect(path: &Path, base: &Path, out: &mut Vec<(String, PathBuf)>) {
 }
 
 /// Encrypts and uploads. Several files or a folder are zipped first (kept in memory, max 300 MB).
-pub fn upload(url: &str, token: &str, paths: &[PathBuf], with_code: bool, mut progress: impl FnMut(u64, u64) + 'static) -> Result<Shared, String> {
+pub fn upload(acc: &Account, paths: &[PathBuf], mode: Mode, mut progress: impl FnMut(u64, u64) + 'static) -> Result<Shared, String> {
+    let url = acc.url.as_str();
     let (name, size, src): (String, u64, Box<dyn Read>) = if paths.len() == 1 && paths[0].is_file() {
         let p = &paths[0];
         let size = std::fs::metadata(p).map_err(|e| e.to_string())?.len();
@@ -249,11 +376,15 @@ pub fn upload(url: &str, token: &str, paths: &[PathBuf], with_code: bool, mut pr
     let key_b64 = b64u(&key_bytes);
     let mut req = agent()
         .post(&format!("{}/api/upload", base(url)))
-        .set("X-Alex-Token", token)
+        .set("Authorization", &acc.auth())
         .set("Content-Type", "application/octet-stream")
         .set("Content-Length", &total.to_string());
-    if with_code {
+    if mode != Mode::Link {
         req = req.set("X-Alex-Key", &key_b64);
+    }
+    if mode == Mode::Phones {
+        let label: String = name.bytes().map(|b| if b.is_ascii_alphanumeric() || b".-_ ".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+        req = req.set("X-Alex-To", "phones").set("X-Alex-Label", &label);
     }
     let r = req.send(enc).map_err(err_of)?;
     let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
@@ -271,7 +402,7 @@ fn safe_name(n: &str) -> String {
 }
 
 /// Receives by 6-digit code (or by a full link) and saves into `dir`. Returns the saved path.
-pub fn receive(url: &str, code_or_link: &str, dir: &Path, mut progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
+pub fn receive(url: &str, code_or_link: &str, dir: &Path, progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
     let input = code_or_link.trim();
     let (srv, id, key) = if let Some((left, key)) = input.split_once('#').filter(|_| input.contains("/s/")) {
         let (srv, id) = left.rsplit_once("/s/").ok_or("Link không đúng")?;
@@ -285,7 +416,11 @@ pub fn receive(url: &str, code_or_link: &str, dir: &Path, mut progress: impl FnM
         let v: serde_json::Value = r.into_json().map_err(|e| e.to_string())?;
         (base(url), v["id"].as_str().unwrap_or("").to_string(), v["key"].as_str().unwrap_or("").to_string())
     };
-    let key_bytes = b64u_decode(&key).filter(|k| k.len() == 32).ok_or("Khoá giải mã không đúng")?;
+    fetch(&srv, &id, &key, dir, progress)
+}
+
+fn fetch(srv: &str, id: &str, key: &str, dir: &Path, mut progress: impl FnMut(u64, u64)) -> Result<PathBuf, String> {
+    let key_bytes = b64u_decode(key).filter(|k| k.len() == 32).ok_or("Khoá giải mã không đúng")?;
     let key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key_bytes).map_err(|_| "key")?);
     let r = agent().get(&format!("{srv}/api/blob/{id}")).call().map_err(err_of)?;
     let total: u64 = r.header("Content-Length").and_then(|v| v.parse().ok()).ok_or("Máy chủ không báo kích thước")?;
@@ -366,13 +501,15 @@ mod tests {
         assert_eq!(b64u(&[0u8; 32]).len(), 43);
     }
 
-    /// Needs a running server: ALEX_SHARE_URL / ALEX_SHARE_TOKEN
+    /// Needs a running server (v2, accounts): ALEX_SHARE_URL
     #[test]
     #[ignore]
     fn upload_and_receive() {
         let url = std::env::var("ALEX_SHARE_URL").unwrap();
-        let tok = std::env::var("ALEX_SHARE_TOKEN").unwrap();
-        ping(&url, &tok).unwrap();
+        let (id, secret, password) = register(&url, "Máy test").unwrap();
+        println!("registered {} / {password}", pretty_id(&id));
+        let acc = Account { url: url.clone(), id, secret };
+        ping(&acc).unwrap();
         let d = std::env::temp_dir().join("alex-share-test");
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(d.join("in/thu muc")).unwrap();
@@ -381,31 +518,65 @@ mod tests {
         std::fs::write(d.join("in/thu muc/a.txt"), "xin chào").unwrap();
         std::fs::write(d.join("in/empty.txt"), "").unwrap();
 
-        // single big file, with code
-        let s = upload(&url, &tok, &[d.join("in/báo giá Q4.bin")], true, |_, _| {}).unwrap();
-        println!("link: {}\ncode: {:?}", s.link, s.code);
+        // code
+        let s = upload(&acc, &[d.join("in/báo giá Q4.bin")], Mode::Code, |_, _| {}).unwrap();
         let got = receive(&url, s.code.as_deref().unwrap(), &d.join("out"), |_, _| {}).unwrap();
         assert_eq!(std::fs::read(&got).unwrap(), big);
         assert_eq!(got.file_name().unwrap().to_string_lossy(), "báo giá Q4.bin");
-        // same file via the link (no code)
-        let s2 = upload(&url, &tok, &[d.join("in/báo giá Q4.bin")], false, |_, _| {}).unwrap();
+        // link only
+        let s2 = upload(&acc, &[d.join("in/báo giá Q4.bin")], Mode::Link, |_, _| {}).unwrap();
         assert!(s2.code.is_none());
-        let got2 = receive(&url, &s2.link, &d.join("out"), |_, _| {}).unwrap();
-        assert_eq!(std::fs::read(&got2).unwrap(), big);
-        // empty file
-        let s3 = upload(&url, &tok, &[d.join("in/empty.txt")], true, |_, _| {}).unwrap();
-        let got3 = receive(&url, s3.code.as_deref().unwrap(), &d.join("out"), |_, _| {}).unwrap();
-        assert_eq!(std::fs::read(&got3).unwrap().len(), 0);
-        // folder → zip
-        let s4 = upload(&url, &tok, &[d.join("in/thu muc")], true, |_, _| {}).unwrap();
-        let got4 = receive(&url, s4.code.as_deref().unwrap(), &d.join("out"), |_, _| {}).unwrap();
-        assert!(got4.to_string_lossy().ends_with("thu muc.zip"));
-        // wrong key must fail and leave nothing behind
+        assert_eq!(std::fs::read(receive(&url, &s2.link, &d.join("out"), |_, _| {}).unwrap()).unwrap(), big);
+        // empty file + folder
+        let s3 = upload(&acc, &[d.join("in/empty.txt")], Mode::Code, |_, _| {}).unwrap();
+        assert_eq!(std::fs::read(receive(&url, s3.code.as_deref().unwrap(), &d.join("out"), |_, _| {}).unwrap()).unwrap().len(), 0);
+        let s4 = upload(&acc, &[d.join("in/thu muc")], Mode::Code, |_, _| {}).unwrap();
+        assert!(receive(&url, s4.code.as_deref().unwrap(), &d.join("out"), |_, _| {}).unwrap().to_string_lossy().ends_with("thu muc.zip"));
+        // to phones (outbox): no code, listed for phones
+        let s5 = upload(&acc, &[d.join("in/thu muc/a.txt")], Mode::Phones, |_, _| {}).unwrap();
+        assert!(s5.code.is_none());
+        // wrong key leaves nothing behind
         let bad = s2.link.rsplit_once('#').unwrap().0.to_string() + "#" + &b64u(&[7u8; 32]);
         assert!(receive(&url, &bad, &d.join("out"), |_, _| {}).is_err());
         assert!(!std::fs::read_dir(d.join("out")).unwrap().flatten().any(|e| e.path().extension().is_some_and(|x| x == "alexpart")));
-        // wrong token
-        assert!(upload(&url, "sai", &[d.join("in/empty.txt")], false, |_, _| {}).is_err());
-        println!("browser link to try: {}", s.link);
+        // bad secret
+        let wrong = Account { secret: "sai".into(), ..acc.clone() };
+        assert!(ping(&wrong).is_err());
+        assert!(upload(&wrong, &[d.join("in/empty.txt")], Mode::Link, |_, _| {}).is_err());
+        // password change + phone list
+        let pw = set_password(&acc, Some("matkhau-moi")).unwrap();
+        assert_eq!(pw, "matkhau-moi");
+        assert!(phones(&acc).unwrap().is_empty());
+        // inbox: nothing waiting -> returns empty after the wait
+        let t = std::time::Instant::now();
+        assert!(wait_inbox(&acc, 2).unwrap().is_empty());
+        assert!(t.elapsed().as_secs_f32() >= 1.5);
+        println!("ACCOUNT {} {} {}", acc.id, acc.secret, pw);
+    }
+}
+
+#[cfg(test)]
+mod inbox_live {
+    use super::*;
+    /// ALEX_SHARE_URL, ALEX_ACC_ID, ALEX_ACC_SECRET: take what phones sent, then send one file to the phones
+    #[test]
+    #[ignore]
+    fn inbox_roundtrip() {
+        let acc = Account { url: std::env::var("ALEX_SHARE_URL").unwrap(), id: std::env::var("ALEX_ACC_ID").unwrap(), secret: std::env::var("ALEX_ACC_SECRET").unwrap() };
+        let dir = std::env::temp_dir().join("alex-inbox-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let items = wait_inbox(&acc, 5).unwrap();
+        println!("inbox: {} item(s)", items.len());
+        for it in &items {
+            let p = fetch_item(&acc, it, &dir, |_, _| {}).unwrap();
+            ack(&acc, &it.id).unwrap();
+            println!("FROM PHONE {} = {:?}", p.file_name().unwrap().to_string_lossy(), std::fs::read_to_string(&p).unwrap_or_default());
+        }
+        assert!(wait_inbox(&acc, 1).unwrap().is_empty(), "acked items must be gone");
+        let f = dir.join("Báo cáo từ máy tính.txt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&f, "Máy tính gửi sang điện thoại ✓").unwrap();
+        let s = upload(&acc, &[f], Mode::Phones, |_, _| {}).unwrap();
+        println!("sent to phones, expires in {:.0}h", s.hours);
     }
 }

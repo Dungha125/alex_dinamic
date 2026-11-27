@@ -47,22 +47,105 @@
   }
   document.querySelectorAll("nav button").forEach(b => b.addEventListener("click", () => show(b.dataset.page)));
 
-  // ------------------------------------------------------------ server status
+  // ------------------------------------------------------------ connected PCs (sessions)
+  // devices: [{id, name, token, online}]; one browser can be connected to several PCs
   let maxBytes = 0;
-  async function ping() {
-    const tok = store.get("token", "");
+  let devices = store.get("devices", []);
+  try { localStorage.removeItem("token"); } catch (_) {} // old shared access token, no longer used
+  const saveDevices = () => store.set("devices", devices.map(d => ({ id: d.id, name: d.name, token: d.token })));
+  const prettyId = id => String(id).replace(/(\d{3})(?=\d)/g, "$1 ");
+  const authOf = d => ({ Authorization: "Session " + d.token });
+
+  async function refreshDevices() {
     try {
-      const r = await fetch(API + "/api/ping", { headers: tok ? { "X-Alex-Token": tok } : {} });
-      const j = await r.json();
-      maxBytes = j.max_bytes || 0;
-      $("dot").className = "dot " + (j.auth ? "ok" : "");
-      $("statusText").textContent = j.auth ? "Sẵn sàng" : tok ? "Sai mã truy cập" : "Chỉ nhận";
-      return j;
+      const r = await fetch(API + "/api/ping");
+      maxBytes = (await r.json()).max_bytes || 0;
     } catch (_) {
-      $("dot").className = "dot bad";
-      $("statusText").textContent = "Mất kết nối";
-      return null;
+      $("dot").className = "dot bad"; $("statusText").textContent = "Mất kết nối"; return;
     }
+    await Promise.all(devices.map(async d => {
+      try {
+        const r = await fetch(API + "/api/linked", { headers: authOf(d) });
+        if (r.status === 401) { d.expired = true; d.online = false; return; }
+        const j = await r.json(); d.name = j.name; d.online = j.online; d.expired = false;
+      } catch (_) { d.online = false; }
+    }));
+    saveDevices();
+    const on = devices.filter(d => d.online).length;
+    $("dot").className = "dot " + (devices.length ? (on ? "ok" : "") : "");
+    $("statusText").textContent = devices.length ? `${on}/${devices.length} máy đang bật` : "Chưa kết nối máy";
+    renderDevices(); renderTargets();
+  }
+
+  function renderDevices() {
+    const el = $("devices");
+    if (!devices.length) { el.innerHTML = `<div class="empty">Chưa kết nối máy tính nào</div>`; return; }
+    el.innerHTML = "";
+    devices.forEach(d => {
+      const row = document.createElement("div");
+      row.className = "hitem";
+      row.innerHTML = `<span class="dot ${d.online ? "ok" : ""}"></span>
+        <div class="meta"><div class="name">${esc(d.name || "Máy tính")}</div>
+        <div class="size">ID ${esc(prettyId(d.id))} · ${d.expired ? "cần kết nối lại (mật khẩu đã đổi)" : d.online ? "đang bật" : "đang tắt"}</div></div>
+        <button class="btn ghost small">Ngắt</button>`;
+      row.querySelector("button").onclick = async () => {
+        if (!confirm(`Ngắt kết nối với “${d.name}”?`)) return;
+        fetch(API + "/api/logout", { method: "POST", headers: authOf(d) }).catch(() => {});
+        devices = devices.filter(x => x !== d); saveDevices(); refreshDevices();
+      };
+      el.appendChild(row);
+    });
+  }
+
+  $("addDevice").onclick = () => { $("addForm").classList.toggle("hidden"); $("devId").focus(); };
+  $("phoneName").value = store.get("phoneName", /iphone/i.test(navigator.userAgent) ? "iPhone" : /ipad/i.test(navigator.userAgent) ? "iPad" : /android/i.test(navigator.userAgent) ? "Điện thoại Android" : "Trình duyệt");
+  $("devId").addEventListener("input", e => { const v = e.target.value.replace(/\D/g, "").slice(0, 9); e.target.value = prettyId(v); });
+  $("connectBtn").onclick = async () => {
+    const id = $("devId").value.replace(/\D/g, ""), password = $("devPw").value.trim(), name = $("phoneName").value.trim() || "Điện thoại";
+    if (id.length !== 9 || !password) { msg("connectMsg", "Nhập đủ ID 9 số và mật khẩu", "bad"); return; }
+    $("connectBtn").disabled = true; msg("connectMsg", "Đang kết nối…");
+    try {
+      const r = await fetch(API + "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, password, name }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "Không kết nối được");
+      devices = devices.filter(d => d.id !== j.device.id);
+      devices.push({ id: j.device.id, name: j.device.name, token: j.token, online: j.device.online });
+      saveDevices(); store.set("phoneName", name);
+      $("devId").value = ""; $("devPw").value = ""; $("addForm").classList.add("hidden");
+      msg("connectMsg", "");
+      toast(`Đã kết nối ${j.device.name}`);
+      target = j.device.id;
+      refreshDevices();
+    } catch (e) { msg("connectMsg", e.message, "bad"); }
+    finally { $("connectBtn").disabled = false; }
+  };
+
+  // send target: a PC id, or "link" for link / 6-digit code
+  let target = store.get("target", "");
+  function renderTargets() {
+    const live = devices.filter(d => !d.expired);
+    if (target !== "link" && !live.some(d => d.id === target)) target = live.length ? live[0].id : "link";
+    const el = $("targets");
+    el.innerHTML = "";
+    for (const d of live) {
+      const c = document.createElement("button");
+      c.className = "chip" + (target === d.id ? " on" : "");
+      c.innerHTML = `<span class="dot ${d.online ? "ok" : ""}"></span>→ ${esc(d.name)}`;
+      c.onclick = () => { target = d.id; store.set("target", target); renderTargets(); };
+      el.appendChild(c);
+    }
+    const l = document.createElement("button");
+    l.className = "chip" + (target === "link" ? " on" : "");
+    l.textContent = "🔗 Link / mã";
+    l.onclick = () => { target = "link"; store.set("target", target); renderTargets(); };
+    el.appendChild(l);
+    if (!live.length) {
+      const a = document.createElement("button");
+      a.className = "chip"; a.textContent = "+ Kết nối máy tính";
+      a.onclick = () => { show("set"); $("addForm").classList.remove("hidden"); };
+      el.appendChild(a);
+    }
+    $("codeSwitch").classList.toggle("hidden", target !== "link");
   }
 
   // ------------------------------------------------------------ crypto
@@ -175,13 +258,14 @@
   $("withCode").checked = store.get("withCode", true);
   $("withCode").addEventListener("change", e => store.set("withCode", e.target.checked));
 
-  function upload(blob, keyB64, withCode, onProgress) {
+  function upload(blob, keyB64, opts, onProgress) {
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open("POST", API + "/api/upload");
-      x.setRequestHeader("X-Alex-Token", store.get("token", ""));
+      x.setRequestHeader("Authorization", "Session " + opts.device.token);
       x.setRequestHeader("Content-Type", "application/octet-stream");
-      if (withCode) x.setRequestHeader("X-Alex-Key", keyB64);
+      if (opts.toPc) { x.setRequestHeader("X-Alex-To", "pc"); x.setRequestHeader("X-Alex-Label", encodeURIComponent(opts.name)); }
+      if (opts.toPc || opts.withCode) x.setRequestHeader("X-Alex-Key", keyB64);
       x.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
       x.onload = () => {
         let j = {};
@@ -194,7 +278,10 @@
   }
 
   $("sendBtn").addEventListener("click", async () => {
-    if (!store.get("token", "")) { toast("Nhập mã truy cập trong Cài đặt trước"); show("set"); return; }
+    const live = devices.filter(d => !d.expired);
+    if (!live.length) { toast("Kết nối một máy tính trước (để có quyền tải lên)"); show("set"); $("addForm").classList.remove("hidden"); return; }
+    const toPc = target !== "link";
+    const device = toPc ? live.find(d => d.id === target) : live[0];
     $("sendBtn").disabled = true;
     $("sendBar").classList.remove("hidden");
     const fill = p => ($("sendFill").style.width = (p * 100).toFixed(1) + "%");
@@ -211,7 +298,15 @@
       const { blob, key } = await encryptFile(file, p => fill(p * 0.3));
       msg("sendMsg", "Đang tải lên…");
       const withCode = $("withCode").checked;
-      const r = await upload(blob, key, withCode, p => fill(0.3 + p * 0.7));
+      const r = await upload(blob, key, { device, toPc, withCode, name: file.name }, p => fill(0.3 + p * 0.7));
+      if (toPc) {
+        queue = []; textMode = false; $("textBox").value = ""; $("textBox").classList.add("hidden"); renderQueue();
+        msg("sendMsg", "");
+        $("sendForm").classList.add("hidden"); $("sentPc").classList.remove("hidden");
+        $("sentPcTitle").textContent = `Đã gửi sang ${device.name}`;
+        $("sentPcSub").textContent = `${file.name} · ${human(file.size)}` + (device.online ? " · Alex sẽ tự lưu vào Downloads\\Alex" : " · máy đang tắt, sẽ nhận khi bật Alex (trong 24 giờ)");
+        return;
+      }
       const item = { id: r.id, code: r.code, del: r.delete_token, expires: r.expires, name: file.name, size: file.size, link: `${SITE}/#s=${r.id}.${key}`, at: Date.now() / 1000 };
       const hist = store.get("history", []); hist.unshift(item); store.set("history", hist.slice(0, 50));
       queue = []; textMode = false; $("textBox").value = ""; $("textBox").classList.add("hidden"); renderQueue();
@@ -245,6 +340,7 @@
     if (navigator.share) { try { await navigator.share({ title: "Alex", text, url: current.link }); } catch (_) {} }
     else copy(current.link);
   };
+  $("sentPcMore").onclick = () => { $("sentPc").classList.add("hidden"); $("sendForm").classList.remove("hidden"); };
   $("sendMore").onclick = () => { $("sendResult").classList.add("hidden"); $("sendForm").classList.remove("hidden"); };
   $("deleteNow").onclick = async () => {
     if (!current || !confirm("Xoá file này khỏi máy chủ ngay? Link và mã sẽ không dùng được nữa.")) return;
@@ -259,6 +355,82 @@
       toast("Đã xoá");
     } catch (e) { toast(e.message); }
   }
+
+  // ------------------------------------------------------------ QR scan / send a link to a PC
+  // A link travels like a tiny file "Link.alexurl" (mime text/x-alex-url) to the PC inbox;
+  // Alex shows it on the island with an "Open" button instead of saving it.
+  let qrStream = null, qrTimer = null, qrTarget = null;
+  const isWeb = t => /^https?:\/\/\S+$/i.test(t.trim());
+  function stopCam() {
+    clearInterval(qrTimer); qrTimer = null;
+    if (qrStream) { qrStream.getTracks().forEach(t => t.stop()); qrStream = null; }
+  }
+  function renderQrTargets() {
+    const live = devices.filter(d => !d.expired);
+    if (!live.some(d => d.id === qrTarget)) qrTarget = live.some(d => d.id === target) ? target : live[0] && live[0].id;
+    const el = $("qrTargets");
+    el.innerHTML = "";
+    for (const d of live) {
+      const c = document.createElement("button");
+      c.className = "chip" + (qrTarget === d.id ? " on" : "");
+      c.innerHTML = `<span class="dot ${d.online ? "ok" : ""}"></span>→ ${esc(d.name)}`;
+      c.onclick = () => { qrTarget = d.id; renderQrTargets(); };
+      el.appendChild(c);
+    }
+    $("qrSend").disabled = !live.length || !$("qrText").value.trim();
+    $("qrSend").textContent = live.length ? "Gửi sang máy tính" : "Kết nối máy tính để gửi";
+    $("qrOpen").disabled = !isWeb($("qrText").value);
+  }
+  async function openScanner() {
+    $("qrSheet").classList.remove("hidden");
+    $("qrText").value = ""; msg("qrMsg", "");
+    renderQrTargets();
+    const can = "BarcodeDetector" in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+    $("qrCam").classList.toggle("hidden", !can);
+    $("qrNoScan").classList.toggle("hidden", !!can);
+    if (!can) return;
+    try {
+      const det = new BarcodeDetector({ formats: ["qr_code"] });
+      qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+      const v = $("qrVideo"); v.srcObject = qrStream; await v.play();
+      qrTimer = setInterval(async () => {
+        try {
+          const codes = await det.detect(v);
+          if (codes.length && codes[0].rawValue) {
+            $("qrText").value = codes[0].rawValue;
+            stopCam(); $("qrCam").classList.add("hidden");
+            if (navigator.vibrate) navigator.vibrate(40);
+            msg("qrMsg", isWeb(codes[0].rawValue) ? "Đã quét được link" : "Đã quét được (không phải link web)", "ok");
+            renderQrTargets();
+          }
+        } catch (_) {}
+      }, 250);
+    } catch (e) {
+      $("qrCam").classList.add("hidden");
+      msg("qrMsg", "Không mở được camera: " + (e.message || e), "bad");
+    }
+  }
+  function closeScanner() { stopCam(); $("qrSheet").classList.add("hidden"); }
+  $("pickQr").onclick = openScanner;
+  $("qrClose").onclick = closeScanner;
+  $("qrText").addEventListener("input", renderQrTargets);
+  $("qrCopy").onclick = () => $("qrText").value.trim() && copy($("qrText").value.trim());
+  $("qrOpen").onclick = () => { const t = $("qrText").value.trim(); if (isWeb(t)) window.open(t, "_blank", "noopener"); };
+  $("qrSend").onclick = async () => {
+    const text = $("qrText").value.trim();
+    const device = devices.find(d => d.id === qrTarget && !d.expired);
+    if (!text || !device) return;
+    $("qrSend").disabled = true; msg("qrMsg", "Đang gửi…");
+    try {
+      const file = new File([text], "Link.alexurl", { type: "text/x-alex-url" });
+      const { blob, key } = await encryptFile(file);
+      await upload(blob, key, { device, toPc: true, name: file.name }, () => {});
+      msg("qrMsg", `Đã gửi sang ${device.name}` + (device.online ? "" : " (máy đang tắt, sẽ hiện khi bật Alex)"), "ok");
+      toast("Đã gửi link");
+      setTimeout(closeScanner, 900);
+    } catch (e) { msg("qrMsg", e.message || String(e), "bad"); }
+    finally { renderQrTargets(); }
+  };
 
   // ------------------------------------------------------------ history
   function renderHistory() {
@@ -308,6 +480,32 @@
     if (m) return { id: m[1], key: m[2] };
     return null;
   }
+
+  async function loadOutbox() {
+    const live = devices.filter(d => !d.expired);
+    const lists = await Promise.all(live.map(async d => {
+      try {
+        const r = await fetch(API + "/api/outbox", { headers: authOf(d) });
+        if (!r.ok) return [];
+        return (await r.json()).items.map(x => ({ ...x, from: d.name }));
+      } catch (_) { return []; }
+    }));
+    const all = lists.flat().sort((a, b) => b.created - a.created);
+    $("outboxCard").classList.toggle("hidden", !all.length);
+    const el = $("outbox");
+    el.innerHTML = "";
+    for (const x of all) {
+      const row = document.createElement("div");
+      row.className = "hitem";
+      row.innerHTML = `<div class="ext" style="width:40px;height:40px;border-radius:10px;flex:none">${esc(extOf(x.label))}</div>
+        <div class="meta"><div class="name">${esc(x.label)}</div><div class="size">${esc(x.from)} · ${human(Math.max(0, x.size - 60))} · ${left(x.expires)}</div></div>
+        <button class="btn small">Tải</button>`;
+      row.querySelector("button").onclick = () => receive(`#s=${x.id}.${x.key}`);
+      el.appendChild(row);
+    }
+  }
+  setInterval(() => { if (!document.hidden && !$("page-recv").classList.contains("hidden")) loadOutbox(); }, 20000);
+  document.querySelector('nav button[data-page="recv"]').addEventListener("click", loadOutbox);
 
   let received = null;
   async function receive(input) {
@@ -371,16 +569,6 @@
   };
 
   // ------------------------------------------------------------ settings
-  $("tokenInput").value = store.get("token", "");
-  $("showToken").onclick = () => { const i = $("tokenInput"); i.type = i.type === "password" ? "text" : "password"; $("showToken").textContent = i.type === "password" ? "Hiện" : "Ẩn"; };
-  $("saveToken").onclick = async () => {
-    store.set("token", $("tokenInput").value.trim());
-    msg("tokenMsg", "Đang kiểm tra…");
-    const j = await ping();
-    if (!j) msg("tokenMsg", "Không kết nối được máy chủ " + API, "bad");
-    else if (j.auth) msg("tokenMsg", `Đúng mã. Tối đa ${human(j.max_bytes)} mỗi lần, lưu ${Math.round(j.ttl / 3600)} giờ.`, "ok");
-    else msg("tokenMsg", "Máy chủ chạy, nhưng mã truy cập không đúng", "bad");
-  };
   $("apiHost").textContent = API.replace(/^https?:\/\//, "");
 
   // Windows app download (latest.json is published next to this page by the release workflow)
@@ -398,7 +586,8 @@
   if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
 
   // ------------------------------------------------------------ start
-  ping();
+  renderDevices(); renderTargets(); refreshDevices();
+  setInterval(() => { if (!document.hidden) refreshDevices(); }, 60000);
   function handleLink() {
     const link = parseLink(location.href);
     if (!link) return;

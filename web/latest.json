@@ -1,10 +1,10 @@
 {
-    "version":  "0.1.0",
-    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.1.0.exe",
-    "sha256":  "da7d5851026e5eb54598011dd12d9fb68dae1efcd0fa970719c27c4e03892a3c",
-    "size":  5049180,
-    "sig":  "CkYPvtjm3cfuYe-q_EABhIJ5iXojS3o6sw3NqJfV-0ZY0hUmY6Ac11_pekfrpZoKcofG_xFH6Z8IP2ptHiIoAg",
-    "notes":  "Bản đầu tiên: đảo nổi, clipboard, nhạc, ghi chú, gửi file LAN (mã hoá đầu cuối) và qua Internet, công cụ PDF/Word/Excel, HEIC sang JPG, chấm mờ khi rảnh, tự cập nhật có ký số.",
+    "version":  "0.2.0",
+    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.2.0.exe",
+    "sha256":  "7c606571b406fb6014df5c0300488e41ecd83803d6773b4b3cc1f818ed68f4d7",
+    "size":  5057753,
+    "sig":  "_zlTrEZikvBw8TqRL6hQB5t8hFDBseasq6MB_xF8yBf27b_GgFXkfIiZqYM1AvXaEpCZp1KizsXfo7BsLeXJBA",
+    "notes":  "Tài khoản ID + mật khẩu thay cho mã truy cập; điện thoại gửi thẳng file sang máy tính và ngược lại; quét QR trên web để mở link trên máy tính bằng nút Mở; web kết nối được nhiều máy.",
     "date":  "2026-11-27",
-    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.1.0"
+    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.2.0"
 }

@@ -129,6 +129,8 @@ pub struct Alex {
     send_queue: Vec<std::path::PathBuf>,
     send_text: String,
     req_pinned: bool,
+    links: Vec<String>,
+    link_pinned: bool,
     extra_id: u64,
     doc_queue: Vec<std::path::PathBuf>,
     jobs: crate::docs::Jobs,
@@ -144,8 +146,9 @@ pub struct Alex {
     update_seen: Option<String>,
 
     share_url_edit: String,
-    share_token_edit: String,
     share_in: String,
+    account: Arc<Mutex<Option<share::Account>>>,
+    show_pw: bool,
     share_setup: bool,
     share: Arc<Mutex<ShareSlot>>,
 }
@@ -155,12 +158,23 @@ enum ShareView {
     Idle,
     Work { label: String, done: u64, total: u64 },
     Sent { link: String, code: Option<String>, hours: f64 },
+    /// sent to the phones connected to this PC
+    Phones { hours: f64 },
     Saved { name: String },
     Fail(String),
 }
 
 struct ShareSlot {
     view: ShareView,
+    /// new account from the server: (id, secret, password)
+    registered: Option<(String, String, String)>,
+    registering: bool,
+    new_password: Option<String>,
+    phones: Option<Vec<share::Phone>>,
+    /// files that arrived from a phone (names), for toasts
+    inbox: Vec<String>,
+    /// links sent from a phone (QR scan / pasted)
+    urls: Vec<String>,
     announce: bool,
     note: String,
     /// ping succeeded; the UI thread saves settings and closes the setup form
@@ -170,6 +184,7 @@ struct ShareSlot {
 impl Alex {
     pub fn new(cc: &eframe::CreationContext) -> Self {
         let ctx = cc.egui_ctx.clone();
+        let inbox_ctx = ctx.clone();
         setup_fonts(&ctx);
         setup_style(&ctx);
 
@@ -214,11 +229,15 @@ impl Alex {
         }
         let (w, h) = COLLAPSED;
         let share_url_edit = data.settings.share_url.clone();
-        let share_token_edit = data.settings.share_token.clone();
-        let share_setup = share_url_edit.trim().is_empty() || share_token_edit.trim().is_empty();
+        let share_setup = share_url_edit.trim().is_empty();
+        let st = &data.settings;
+        let account = Arc::new(Mutex::new(
+            (!st.device_id.is_empty() && !st.device_secret.is_empty() && st.device_server == st.share_url)
+                .then(|| share::Account { url: st.share_url.clone(), id: st.device_id.clone(), secret: st.device_secret.clone() }),
+        ));
         // ALEX_TAB=<0-5> opens the island pinned on a tab (handy for screenshots/debugging)
         let debug_tab = std::env::var("ALEX_TAB").ok().and_then(|v| v.parse::<usize>().ok()).filter(|i| *i < TABS.len());
-        Alex {
+        let alex = Alex {
             hwnd: None,
             region: (-1, -1, -1, -1),
             w: Spring { x: w, v: 0.0 },
@@ -252,6 +271,8 @@ impl Alex {
             send_queue: Vec::new(),
             send_text: String::new(),
             req_pinned: false,
+            links: Vec::new(),
+            link_pinned: false,
             extra_id: u64::MAX / 4,
             doc_queue: Vec::new(),
             jobs: Default::default(),
@@ -262,10 +283,22 @@ impl Alex {
             ctrl_flag,
             // ALEX_PDF=<file> [ALEX_PDF_MODE=view|draw|pages] opens the PDF window at start (debug/screenshots)
             share_url_edit,
-            share_token_edit,
             share_in: String::new(),
+            account,
+            show_pw: false,
             share_setup,
-            share: Arc::new(Mutex::new(ShareSlot { view: ShareView::Idle, announce: false, note: String::new(), linked: false })),
+            share: Arc::new(Mutex::new(ShareSlot {
+                view: ShareView::Idle,
+                announce: false,
+                note: String::new(),
+                linked: false,
+                registered: None,
+                registering: false,
+                new_password: None,
+                phones: None,
+                inbox: Vec::new(),
+                urls: Vec::new(),
+            })),
             update: {
                 let r = cc.egui_ctx.clone();
                 crate::update::spawn(move || r.request_repaint())
@@ -280,7 +313,9 @@ impl Alex {
                 };
                 crate::pdfview::PdfWindow::open(p.into(), mode, &cc.egui_ctx)
             }),
-        }
+        };
+        spawn_inbox(alex.account.clone(), alex.share.clone(), inbox_ctx);
+        alex
     }
 
     fn toast(&mut self, now: f64, title: &str, sub: &str) {
@@ -357,6 +392,7 @@ impl Alex {
                 match &g.view {
                     ShareView::Sent { link, .. } => Some(("sent", link.clone())),
                     ShareView::Saved { name } => Some(("saved", name.clone())),
+                    ShareView::Phones { .. } => Some(("phones", String::new())),
                     ShareView::Fail(e) => Some(("fail", e.clone())),
                     _ => None,
                 }
@@ -366,13 +402,60 @@ impl Alex {
             (linked, g.note.clone(), announce)
         };
         if linked {
-            self.data.settings.share_url = self.share_url_edit.trim().to_string();
-            self.data.settings.share_token = self.share_token_edit.trim().to_string();
-            self.data.save();
             self.share_setup = false;
-            self.toast(now, "Đã kết nối", &note);
+            self.toast(now, "Đã kết nối máy chủ", &note);
             if let Some(t) = &mut self.toast {
                 t.until = now + 3.2;
+            }
+        }
+        let (registered, new_pw, inbox, urls) = {
+            let mut g = self.share.lock().unwrap();
+            (g.registered.take(), g.new_password.take(), std::mem::take(&mut g.inbox), std::mem::take(&mut g.urls))
+        };
+        if !urls.is_empty() {
+            // show the island with the link, even if it was a faded dot
+            for u in urls {
+                if !self.links.contains(&u) {
+                    self.links.insert(0, u);
+                }
+            }
+            self.links.truncate(5);
+            self.dormant = false;
+            self.hidden = false;
+            self.expanded = true;
+            self.pinned_open = true;
+            self.link_pinned = true;
+            self.tab = Tab::Send;
+            self.last_active = now;
+        } else if self.links.is_empty() && self.link_pinned {
+            self.link_pinned = false;
+            self.pinned_open = false;
+        }
+        if let Some((id, secret, pw)) = registered {
+            let st = &mut self.data.settings;
+            st.device_id = id.clone();
+            st.device_secret = secret.clone();
+            st.device_password = pw;
+            st.device_server = st.share_url.clone();
+            *self.account.lock().unwrap() = Some(share::Account { url: st.share_url.clone(), id: id.clone(), secret });
+            self.data.save();
+            self.toast(now, "Đã tạo tài khoản", &format!("ID {}", share::pretty_id(&id)));
+        }
+        if let Some(pw) = new_pw {
+            self.data.settings.device_password = pw;
+            self.data.save();
+            self.toast(now, "Đã đổi mật khẩu", "Các điện thoại cần kết nối lại");
+        }
+        for name in inbox {
+            self.toast(now, "Nhận từ điện thoại", &truncate(&name, 28));
+            if let Some(t) = &mut self.toast {
+                t.until = now + 3.5;
+            }
+        }
+        if self.account.lock().unwrap().is_none() && !self.share_setup && !self.share.lock().unwrap().registering {
+            let failed = matches!(self.share.lock().unwrap().view, ShareView::Fail(_));
+            if !failed {
+                self.share_register();
             }
         }
         match announce {
@@ -387,6 +470,10 @@ impl Alex {
                 }
             }
             Some(("saved", name)) => self.toast(now, "Đã nhận file", &truncate(&name, 28)),
+            Some(("phones", _)) => {
+                self.send_queue.clear();
+                self.toast(now, "Đã gửi sang điện thoại", "Mở tab Nhận trên web Alex");
+            }
             Some(("fail", e)) => self.toast(now, "Gửi qua Internet", &truncate(&e, 36)),
             _ => {}
         }
@@ -406,27 +493,57 @@ impl Alex {
     }
 
     fn share_save_check(&mut self) {
-        let url = self.share_url_edit.trim().to_string();
-        let token = self.share_token_edit.trim().to_string();
-        if url.is_empty() || token.is_empty() {
+        let url = self.share_url_edit.trim().trim_end_matches('/').to_string();
+        if url.is_empty() {
             let mut g = self.share.lock().unwrap();
-            g.view = ShareView::Fail("Nhập địa chỉ máy chủ và mã truy cập".into());
+            g.view = ShareView::Fail("Nhập địa chỉ máy chủ".into());
             g.announce = true;
             return;
         }
-        self.share_work("Đang kiểm tra máy chủ…");
+        if url != self.data.settings.device_server {
+            // an account belongs to one server: forget it and register again there
+            *self.account.lock().unwrap() = None;
+            let st = &mut self.data.settings;
+            st.device_id.clear();
+            st.device_secret.clear();
+            st.device_password.clear();
+        }
+        self.data.settings.share_url = url;
+        self.data.save();
+        self.share_setup = false;
+        self.share.lock().unwrap().view = ShareView::Idle;
+    }
+
+    fn share_register(&mut self) {
+        let url = self.data.settings.share_url.clone();
+        let name = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Máy tính".into());
         let slot = self.share.clone();
         let ctx = self.ctx.clone();
+        slot.lock().unwrap().registering = true;
         std::thread::spawn(move || {
-            match share::ping(&url, &token) {
-                Ok(max) => {
-                    let mut g = slot.lock().unwrap();
-                    g.note = format!("Mỗi file tối đa {}", net::human(max));
-                    g.view = ShareView::Idle;
-                    g.linked = true;
+            let r = share::register(&url, &name);
+            let mut g = slot.lock().unwrap();
+            g.registering = false;
+            match r {
+                Ok(acc) => g.registered = Some(acc),
+                Err(e) => g.view = ShareView::Fail(format!("Không tạo được tài khoản: {e}")),
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn share_change_password(&mut self) {
+        let Some(acc) = self.account.lock().unwrap().clone() else { return };
+        let (slot, ctx) = (self.share.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let r = share::set_password(&acc, None);
+            let mut g = slot.lock().unwrap();
+            match r {
+                Ok(pw) => {
+                    g.new_password = Some(pw);
+                    g.phones = Some(Vec::new());
                 }
                 Err(e) => {
-                    let mut g = slot.lock().unwrap();
                     g.view = ShareView::Fail(e);
                     g.announce = true;
                 }
@@ -435,21 +552,49 @@ impl Alex {
         });
     }
 
-    fn share_upload(&mut self) {
+    fn share_load_phones(&self) {
+        let Some(acc) = self.account.lock().unwrap().clone() else { return };
+        let (slot, ctx) = (self.share.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            if let Ok(list) = share::phones(&acc) {
+                slot.lock().unwrap().phones = Some(list);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn share_disconnect(&self, sid: String) {
+        let Some(acc) = self.account.lock().unwrap().clone() else { return };
+        let (slot, ctx) = (self.share.clone(), self.ctx.clone());
+        std::thread::spawn(move || {
+            let _ = share::disconnect_phone(&acc, &sid);
+            if let Ok(list) = share::phones(&acc) {
+                slot.lock().unwrap().phones = Some(list);
+            }
+            ctx.request_repaint();
+        });
+    }
+
+    fn share_upload(&mut self, to_phones: bool) {
         if self.share_busy() || self.send_queue.is_empty() {
             return;
         }
-        let url = self.data.settings.share_url.clone();
-        let token = self.data.settings.share_token.clone();
+        let Some(acc) = self.account.lock().unwrap().clone() else { return };
         let paths = self.send_queue.clone();
-        let with_code = self.data.settings.share_with_code;
+        let mode = if to_phones {
+            share::Mode::Phones
+        } else if self.data.settings.share_with_code {
+            share::Mode::Code
+        } else {
+            share::Mode::Link
+        };
         self.share_work(if paths.len() == 1 && paths[0].is_file() { "Đang tải lên…" } else { "Đang nén và tải lên…" });
         let slot = self.share.clone();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
             let slot2 = slot.clone();
             let ctx2 = ctx.clone();
-            let res = share::upload(&url, &token, &paths, with_code, move |done, total| {
+            let res = share::upload(&acc, &paths, mode, move |done, total| {
                 if let Ok(mut g) = slot2.lock() {
                     if let ShareView::Work { label, .. } = &g.view {
                         let label = label.clone();
@@ -460,6 +605,10 @@ impl Alex {
             });
             let mut g = slot.lock().unwrap();
             match res {
+                Ok(s) if mode == share::Mode::Phones => {
+                    g.view = ShareView::Phones { hours: s.hours };
+                    g.announce = true;
+                }
                 Ok(s) => {
                     g.view = ShareView::Sent { link: s.link, code: s.code, hours: s.hours };
                     g.announce = true;
@@ -1499,3 +1648,51 @@ fn paint_plant(p: &egui::Painter, r: Rect, progress: f32) {
 
 #[allow(dead_code)]
 fn _unused(_: Pos2) {}
+
+/// Waits (long-poll) for files a phone sent to this PC, saves them to Downloads\Alex.
+/// Follows whatever account is current; idles while there is none.
+fn spawn_inbox(account: Arc<Mutex<Option<share::Account>>>, slot: Arc<Mutex<ShareSlot>>, ctx: egui::Context) {
+    std::thread::spawn(move || {
+        let mut failures: HashMap<String, u32> = HashMap::new();
+        loop {
+            let acc = account.lock().unwrap().clone();
+            let Some(acc) = acc else {
+                std::thread::sleep(Duration::from_secs(5));
+                continue;
+            };
+            match share::wait_inbox(&acc, 25) {
+                Ok(items) => {
+                    for it in items {
+                        match share::fetch_item(&acc, &it, &net::downloads_dir(), |_, _| {}) {
+                            Ok(p) => {
+                                let _ = share::ack(&acc, &it.id);
+                                if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("alexurl")) {
+                                    let text = std::fs::read_to_string(&p).unwrap_or_default();
+                                    let _ = std::fs::remove_file(&p);
+                                    let text: String = text.trim().chars().take(4000).collect();
+                                    if !text.is_empty() {
+                                        slot.lock().unwrap().urls.push(text);
+                                    }
+                                } else {
+                                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(it.label.clone());
+                                    slot.lock().unwrap().inbox.push(name);
+                                }
+                                ctx.request_repaint();
+                            }
+                            Err(_) => {
+                                // give up on a file that keeps failing (e.g. damaged), retry otherwise
+                                let n = failures.entry(it.id.clone()).or_insert(0);
+                                *n += 1;
+                                if *n >= 3 {
+                                    let _ = share::ack(&acc, &it.id);
+                                }
+                                std::thread::sleep(Duration::from_secs(5));
+                            }
+                        }
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_secs(15)),
+            }
+        }
+    });
+}

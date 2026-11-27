@@ -44,8 +44,12 @@ pub struct Settings {
     /// own share server, e.g. https://api.alex.tailieuptit.com
     #[serde(default = "default_share_url")]
     pub share_url: String,
-    /// upload token (X-Alex-Token); kept in data.json on this PC
-    pub share_token: String,
+    /// this PC's account on the share server (9-digit ID, private secret, password for phones)
+    pub device_id: String,
+    pub device_secret: String,
+    pub device_password: String,
+    /// the server the account above belongs to
+    pub device_server: String,
     /// when true, uploads also leave the decryption key on the server so a 6-digit code is enough
     #[serde(default = "default_true")]
     pub share_with_code: bool,
@@ -60,7 +64,10 @@ impl Default for Settings {
             auto_dormant: true,
             idle_secs: 8,
             share_url: default_share_url(),
-            share_token: String::new(),
+            device_id: String::new(),
+            device_secret: String::new(),
+            device_password: String::new(),
+            device_server: String::new(),
             share_with_code: true,
             auto_update: true,
         }
