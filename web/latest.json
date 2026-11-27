@@ -1,10 +1,10 @@
 {
-    "version":  "0.2.0",
-    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.2.0.exe",
-    "sha256":  "7c606571b406fb6014df5c0300488e41ecd83803d6773b4b3cc1f818ed68f4d7",
-    "size":  5057753,
-    "sig":  "_zlTrEZikvBw8TqRL6hQB5t8hFDBseasq6MB_xF8yBf27b_GgFXkfIiZqYM1AvXaEpCZp1KizsXfo7BsLeXJBA",
-    "notes":  "Tài khoản ID + mật khẩu thay cho mã truy cập; điện thoại gửi thẳng file sang máy tính và ngược lại; quét QR trên web để mở link trên máy tính bằng nút Mở; web kết nối được nhiều máy.",
+    "version":  "0.3.0",
+    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.3.0.exe",
+    "sha256":  "e52273cfe4ee1c0fdf6c6843b50e18df954fb937bd4d603b8ec172c07843cb36",
+    "size":  5061969,
+    "sig":  "k8QoFhT69pl2Xl3TRvtHygJoitI80CmeJyWUJXqWueE1aq4K6CxuUGMh_DA1kn7WAvWr-Lyi_KyBEJJcq-JZAA",
+    "notes":  "Tài khoản web giữ các máy đã kết nối (đăng nhập lại trên điện thoại khác là thấy đủ máy); thả file lên đảo gửi thẳng sang điện thoại; sửa camera và quét QR trên web điện thoại.",
     "date":  "2026-11-27",
-    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.2.0"
+    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.3.0"
 }
