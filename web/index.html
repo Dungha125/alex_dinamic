@@ -152,7 +152,7 @@
   <div class="sheet-card">
     <div class="row" style="align-items:center"><h2 style="margin:0;flex:1">Quét QR</h2><button class="x" id="qrClose" aria-label="Đóng">×</button></div>
     <div class="cam" id="qrCam"><video id="qrVideo" playsinline muted></video><div class="frame"></div></div>
-    <p class="sub hidden" id="qrNoScan" style="margin:10px 0 0">Trình duyệt này chưa quét QR trực tiếp được (iPhone). Quét bằng ứng dụng Camera rồi dán link vào ô dưới.</p>
+    <p class="sub hidden" id="qrNoScan" style="margin:10px 0 0">Trình duyệt không cho mở camera. Hãy dùng HTTPS, cho phép camera, hoặc dán link vào ô dưới.</p>
     <input class="field mt" id="qrText" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="…hoặc dán link vào đây">
     <div class="targets mt" id="qrTargets"></div>
     <button class="btn mt" id="qrSend">Gửi sang máy tính</button>
@@ -167,6 +167,7 @@
 
 <script src="config.js"></script>
 <script src="qr.js"></script>
+<script src="qrdecode.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

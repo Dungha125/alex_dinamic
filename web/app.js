@@ -381,33 +381,71 @@
     $("qrSend").textContent = live.length ? "Gửi sang máy tính" : "Kết nối máy tính để gửi";
     $("qrOpen").disabled = !isWeb($("qrText").value);
   }
+  async function openCamera() {
+    const tries = [
+      { video: { facingMode: { ideal: "environment" } }, audio: false },
+      { video: true, audio: false },
+    ];
+    let last;
+    for (const c of tries) {
+      try { return await navigator.mediaDevices.getUserMedia(c); }
+      catch (e) { last = e; }
+    }
+    throw last;
+  }
+  function camError(e) {
+    if (!window.isSecureContext) return "Camera chỉ chạy trên HTTPS.";
+    if (e && (e.name === "NotAllowedError" || e.name === "PermissionDeniedError")) return "Bạn chưa cho phép dùng camera.";
+    if (e && e.name === "NotFoundError") return "Không thấy camera trên máy này.";
+    return "Không mở được camera: " + ((e && e.message) || e || "");
+  }
+  function onQrText(text) {
+    $("qrText").value = text;
+    stopCam();
+    $("qrCam").classList.add("hidden");
+    if (navigator.vibrate) navigator.vibrate(40);
+    msg("qrMsg", isWeb(text) ? "Đã quét được link" : "Đã quét được (không phải link web)", "ok");
+    renderQrTargets();
+  }
   async function openScanner() {
     $("qrSheet").classList.remove("hidden");
     $("qrText").value = ""; msg("qrMsg", "");
     renderQrTargets();
-    const can = "BarcodeDetector" in window && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+    const can = navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
     $("qrCam").classList.toggle("hidden", !can);
     $("qrNoScan").classList.toggle("hidden", !!can);
     if (!can) return;
     try {
-      const det = new BarcodeDetector({ formats: ["qr_code"] });
-      qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
-      const v = $("qrVideo"); v.srcObject = qrStream; await v.play();
+      const det = "BarcodeDetector" in window ? new BarcodeDetector({ formats: ["qr_code"] }) : null;
+      qrStream = await openCamera();
+      const v = $("qrVideo");
+      v.srcObject = qrStream;
+      v.muted = true;
+      v.playsInline = true;
+      v.setAttribute("playsinline", "");
+      await v.play();
+      const canvas = document.createElement("canvas");
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
       qrTimer = setInterval(async () => {
         try {
-          const codes = await det.detect(v);
-          if (codes.length && codes[0].rawValue) {
-            $("qrText").value = codes[0].rawValue;
-            stopCam(); $("qrCam").classList.add("hidden");
-            if (navigator.vibrate) navigator.vibrate(40);
-            msg("qrMsg", isWeb(codes[0].rawValue) ? "Đã quét được link" : "Đã quét được (không phải link web)", "ok");
-            renderQrTargets();
+          if (det) {
+            const codes = await det.detect(v);
+            if (codes.length && codes[0].rawValue) onQrText(codes[0].rawValue);
+            return;
           }
+          if (!window.decodeQrImage || !v.videoWidth) return;
+          const scale = Math.min(1, 480 / Math.max(v.videoWidth, v.videoHeight));
+          canvas.width = Math.max(1, Math.round(v.videoWidth * scale));
+          canvas.height = Math.max(1, Math.round(v.videoHeight * scale));
+          ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+          const text = window.decodeQrImage(ctx.getImageData(0, 0, canvas.width, canvas.height));
+          if (text) onQrText(text);
         } catch (_) {}
-      }, 250);
+      }, 280);
     } catch (e) {
       $("qrCam").classList.add("hidden");
-      msg("qrMsg", "Không mở được camera: " + (e.message || e), "bad");
+      $("qrNoScan").classList.remove("hidden");
+      msg("qrMsg", camError(e), "bad");
     }
   }
   function closeScanner() { stopCam(); $("qrSheet").classList.add("hidden"); }
