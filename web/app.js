@@ -51,8 +51,11 @@
   // devices: [{id, name, token, online}]; one browser can be connected to several PCs
   let maxBytes = 0;
   let devices = store.get("devices", []);
+  let account = store.get("account", null); // {user, token}
   try { localStorage.removeItem("token"); } catch (_) {} // old shared access token, no longer used
   const saveDevices = () => store.set("devices", devices.map(d => ({ id: d.id, name: d.name, token: d.token })));
+  const saveAccount = () => store.set("account", account);
+  const accountAuth = () => account ? { Authorization: "Account " + account.token, "Content-Type": "application/json" } : {};
   const prettyId = id => String(id).replace(/(\d{3})(?=\d)/g, "$1 ");
   const authOf = d => ({ Authorization: "Session " + d.token });
 
@@ -91,6 +94,7 @@
       row.querySelector("button").onclick = async () => {
         if (!confirm(`Ngắt kết nối với “${d.name}”?`)) return;
         fetch(API + "/api/logout", { method: "POST", headers: authOf(d) }).catch(() => {});
+        if (account) fetch(API + "/api/account/unlink", { method: "POST", headers: accountAuth(), body: JSON.stringify({ id: d.id }) }).catch(() => {});
         devices = devices.filter(x => x !== d); saveDevices(); refreshDevices();
       };
       el.appendChild(row);
@@ -105,8 +109,11 @@
     if (id.length !== 9 || !password) { msg("connectMsg", "Nhập đủ ID 9 số và mật khẩu", "bad"); return; }
     $("connectBtn").disabled = true; msg("connectMsg", "Đang kết nối…");
     try {
-      const r = await fetch(API + "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, password, name }) });
+      const url = account ? "/api/account/link" : "/api/login";
+      const headers = account ? accountAuth() : { "Content-Type": "application/json" };
+      const r = await fetch(API + url, { method: "POST", headers, body: JSON.stringify({ id, password, name }) });
       const j = await r.json().catch(() => ({}));
+      if (r.status === 401 && account && url.endsWith("/link")) throw new Error(j.error || "Tài khoản đã hết hạn, hãy đăng nhập lại");
       if (!r.ok) throw new Error(j.error || "Không kết nối được");
       devices = devices.filter(d => d.id !== j.device.id);
       devices.push({ id: j.device.id, name: j.device.name, token: j.token, online: j.device.online });
@@ -119,6 +126,79 @@
     } catch (e) { msg("connectMsg", e.message, "bad"); }
     finally { $("connectBtn").disabled = false; }
   };
+
+  function renderAccount() {
+    const inn = !!account;
+    $("accountOut").classList.toggle("hidden", inn);
+    $("accountIn").classList.toggle("hidden", !inn);
+    if (account) $("accName").textContent = account.user;
+  }
+  function takeDeviceRows(rows) {
+    for (const row of rows || []) {
+      const cur = devices.find(d => d.id === row.id);
+      if (row.reauth) {
+        if (cur) { cur.expired = true; cur.online = false; cur.name = row.name || cur.name; }
+        else devices.push({ id: row.id, name: row.name, token: "", online: false, expired: true });
+        continue;
+      }
+      if (row.token) {
+        if (cur) { cur.token = row.token; cur.name = row.name; cur.expired = false; cur.online = !!row.online; }
+        else devices.push({ id: row.id, name: row.name, token: row.token, online: !!row.online, expired: false });
+      } else if (cur) {
+        cur.name = row.name || cur.name;
+        cur.online = !!row.online;
+        cur.expired = false;
+      }
+    }
+    saveDevices();
+  }
+  async function accountCall(path, body) {
+    const r = await fetch(API + path, { method: "POST", headers: account ? accountAuth() : { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 && account && path !== "/api/account/login") {
+      account = null; saveAccount(); renderAccount();
+      throw new Error("Phiên tài khoản đã hết, hãy đăng nhập lại");
+    }
+    if (!r.ok) throw new Error(j.error || "Không thực hiện được");
+    return j;
+  }
+  async function syncAccount() {
+    if (!account) return;
+    const have = devices.filter(d => d.token && !d.expired).map(d => d.id);
+    const j = await accountCall("/api/account/sync", { have });
+    takeDeviceRows(j.devices);
+  }
+  async function enterAccount(path) {
+    const user = $("accUser").value.trim().toLowerCase();
+    const password = $("accPw").value;
+    if (!user || password.length < 8) { msg("accMsg", "Tên tài khoản và mật khẩu ít nhất 8 ký tự", "bad"); return; }
+    $("accLogin").disabled = true; $("accReg").disabled = true; msg("accMsg", "Đang kiểm tra…");
+    try {
+      const kept = devices.filter(d => d.token && !d.expired).map(d => d.token);
+      const j = await accountCall(path, { user, password });
+      account = { user: j.user, token: j.token };
+      saveAccount();
+      takeDeviceRows(j.devices);
+      if (kept.length) {
+        try { await accountCall("/api/account/adopt", { tokens: kept }); } catch (_) {}
+      }
+      $("accPw").value = "";
+      msg("accMsg", "");
+      renderAccount();
+      toast(path.endsWith("register") ? "Đã tạo tài khoản" : "Đã đăng nhập");
+      refreshDevices();
+    } catch (e) { msg("accMsg", e.message, "bad"); }
+    finally { $("accLogin").disabled = false; $("accReg").disabled = false; }
+  }
+  $("accLogin").onclick = () => enterAccount("/api/account/login");
+  $("accReg").onclick = () => enterAccount("/api/account/register");
+  $("accLogout").onclick = async () => {
+    const tok = account;
+    account = null; saveAccount(); renderAccount();
+    if (tok) fetch(API + "/api/account/logout", { method: "POST", headers: { Authorization: "Account " + tok.token } }).catch(() => {});
+    toast("Đã đăng xuất. Máy trên điện thoại này vẫn kết nối");
+  };
+  renderAccount();
 
   // send target: a PC id, or "link" for link / 6-digit code
   let target = store.get("target", "");
@@ -624,7 +704,8 @@
   if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("sw.js").catch(() => {});
 
   // ------------------------------------------------------------ start
-  renderDevices(); renderTargets(); refreshDevices();
+  renderDevices(); renderTargets();
+  syncAccount().catch(() => {}).finally(() => refreshDevices());
   setInterval(() => { if (!document.hidden) refreshDevices(); }, 60000);
   function handleLink() {
     const link = parseLink(location.href);

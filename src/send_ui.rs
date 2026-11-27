@@ -124,9 +124,9 @@ impl Alex {
         // what to send ---------------------------------------------------
         card(ui, |ui| {
             if self.send_queue.is_empty() {
-                ui.label(RichText::new("Kéo file hoặc thư mục thả lên đảo").font(bold(14.0)));
+                ui.label(RichText::new("Kéo file thả lên đảo").font(bold(14.0)));
                 ui.label(
-                    RichText::new("rồi bấm vào tên máy bên dưới để gửi. Gửi thẳng trong mạng LAN, mã hoá đầu cuối, không qua cloud.")
+                    RichText::new("File được gửi thẳng sang điện thoại đang kết nối. Thả lên đây rồi bấm tên máy nếu muốn gửi trong mạng LAN.")
                         .small()
                         .color(DIM),
                 );
@@ -375,7 +375,7 @@ impl Alex {
 
                 // ------------------------------------------------------ send
                 if self.send_queue.is_empty() {
-                    ui.label(RichText::new("Thả file lên đảo để gửi sang điện thoại hoặc lấy link. File từ điện thoại gửi sang tự lưu vào Downloads\\Alex.").small().color(DIM));
+                    ui.label(RichText::new("Thả file lên đảo để gửi sang điện thoại. File từ điện thoại gửi sang tự lưu vào Downloads\\Alex.").small().color(DIM));
                 } else {
                     ui.add_enabled_ui(!busy, |ui| {
                         ui.horizontal(|ui| {

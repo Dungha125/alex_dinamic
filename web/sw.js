@@ -1,6 +1,6 @@
 // Offline shell for the Alex web app. API calls (other origin), latest.json and
 // downloads always go to the network.
-const CACHE = "alex-web-v3";
+const CACHE = "alex-web-v4";
 const SHELL = ["./", "index.html", "style.css", "app.js", "qr.js", "qrdecode.js", "config.js", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 
 self.addEventListener("install", e => {

@@ -8,6 +8,8 @@ Accounts (no shared access token any more):
     (shown in the app, for phones) and a private device secret (kept by the app).
   * A phone / web browser signs in with ID + password and gets a session token.
     One browser can be signed in to several PCs.
+  * A web account (name + password) remembers those PCs. Signing in on another
+    phone restores every PC that was linked, without typing each ID again.
 Transfers (all blobs are AES-256-GCM encrypted by the client, format "ALXS1"):
   * link   : key only in the URL #fragment (server cannot decrypt)
   * code   : 6-digit code; the key is deposited here
@@ -57,8 +59,11 @@ cond = threading.Condition()  # guards everything below; notified on new inbox i
 items = {}     # blob id -> meta
 codes = {}     # 6-digit code -> blob id
 devices = {}   # device id -> {id, name, secret, salt, pw, created, seen}
-sessions = {}  # sha256(token) -> {sid, device, name, created, last}
+sessions = {}  # sha256(token) -> {sid, device, name, created, last, account?}
+accounts = {}  # username -> {user, salt, pw, created, links: {device id: {name, pw, created}}}
+account_sessions = {}  # sha256(token) -> {user, created, last}
 hits = {}      # (bucket, key) -> [timestamps]   rate limiting
+USER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,31}$")
 
 
 # ------------------------------------------------------------------ storage
@@ -76,11 +81,13 @@ def save_json(name, obj):
 def save_accounts():
     save_json("devices.json", devices)
     save_json("sessions.json", sessions)
+    save_json("accounts.json", accounts)
+    save_json("account_sessions.json", account_sessions)
 
 
 def load():
     os.makedirs(path("blobs"), exist_ok=True)
-    for name, target in (("devices.json", devices), ("sessions.json", sessions)):
+    for name, target in (("devices.json", devices), ("sessions.json", sessions), ("accounts.json", accounts), ("account_sessions.json", account_sessions)):
         try:
             with open(path(name)) as f:
                 target.update(json.load(f))
@@ -123,8 +130,10 @@ def cleaner():
             for i in [i for i, m in items.items() if m["expires"] <= now]:
                 remove_item(i)
             stale = [k for k, s in sessions.items() if now - s["last"] > SESSION_DAYS * 86400]
+            stale += [k for k, s in account_sessions.items() if now - s["last"] > SESSION_DAYS * 86400]
             for k in stale:
-                del sessions[k]
+                sessions.pop(k, None)
+                account_sessions.pop(k, None)
             if stale:
                 save_accounts()
             for k in list(hits):
@@ -157,6 +166,56 @@ def limited(bucket, key, limit, window):
 
 def note(bucket, key):
     hits.setdefault((bucket, key), []).append(time.time())
+
+
+def norm_user(s):
+    return str(s or "").strip().lower()
+
+
+def mint_session(did, name, account=None):
+    """Call under cond. Returns the raw session token."""
+    token = secrets.token_urlsafe(32)
+    rec = {"sid": secrets.token_hex(6), "device": did, "name": clean_name(name, "Điện thoại"),
+           "created": time.time(), "last": time.time()}
+    if account:
+        rec["account"] = account
+    sessions[sha(token)] = rec
+    return token
+
+
+def account_of(handler):
+    """Username for an `Authorization: Account <token>` header, or None. Call freely (locks)."""
+    h = handler.headers.get("Authorization", "")
+    if not h.startswith("Account "):
+        return None
+    with cond:
+        s = account_sessions.get(sha(h[8:].strip()))
+        if not s or s["user"] not in accounts:
+            return None
+        s["last"] = time.time()
+        return s["user"]
+
+
+def device_rows(user, have):
+    """Call under cond. Mints a session token for each linked PC this browser does not already have."""
+    rows = []
+    links = accounts[user].setdefault("links", {})
+    for did, link in list(links.items()):
+        d = devices.get(did)
+        if not d:
+            continue
+        stale = link.get("pw") != d["pw"]
+        row = {"id": did, "name": d["name"], "online": time.time() - d.get("seen", 0) < 90, "reauth": stale}
+        if not stale and did not in have:
+            row["token"] = mint_session(did, link.get("name"), user)
+        rows.append(row)
+    return rows
+
+
+def remember_link(user, did, phone_name):
+    """Call under cond, after the device password has just been checked."""
+    d = devices[did]
+    accounts[user].setdefault("links", {})[did] = {"name": clean_name(phone_name, "Điện thoại"), "pw": d["pw"], "created": time.time()}
 
 
 def clean_name(s, default):
@@ -355,11 +414,40 @@ class Handler(BaseHTTPRequestHandler):
                     note("login-ip", ip)
                     note("login-dev", did)
                     return self.reply(401, {"error": "Sai ID hoặc mật khẩu"})
-                token = secrets.token_urlsafe(32)
-                sessions[sha(token)] = {"sid": secrets.token_hex(6), "device": did, "name": clean_name(data.get("name"), "Điện thoại"),
-                                        "created": time.time(), "last": time.time()}
+                token = mint_session(did, data.get("name"))
                 save_accounts()
                 return self.reply(200, {"token": token, "device": {"id": did, "name": d["name"], "online": self.online(did)}})
+
+        if p in ("/api/account/register", "/api/account/login"):
+            return self.account_enter(p, data)
+        user = account_of(self)
+        if p == "/api/account/sync" and user:
+            have = data.get("have") if isinstance(data.get("have"), list) else []
+            have = {re.sub(r"\D", "", str(x)) for x in have}
+            with cond:
+                rows = device_rows(user, have)
+                save_accounts()
+            return self.reply(200, {"user": user, "devices": rows})
+        if p == "/api/account/link" and user:
+            return self.account_link(user, data)
+        if p == "/api/account/adopt" and user:
+            return self.account_adopt(user, data)
+        if p == "/api/account/unlink" and user:
+            did = re.sub(r"\D", "", str(data.get("id", "")))
+            with cond:
+                accounts[user].setdefault("links", {}).pop(did, None)
+                for k in [k for k, s in sessions.items() if s.get("account") == user and s["device"] == did]:
+                    del sessions[k]
+                save_accounts()
+            return self.reply(200, {"ok": True})
+        if p == "/api/account/logout" and user:
+            h = self.headers.get("Authorization", "")
+            with cond:
+                account_sessions.pop(sha(h[8:].strip()), None)
+                save_accounts()
+            return self.reply(200, {"ok": True})
+        if p.startswith("/api/account/"):
+            return self.reply(401, {"error": "Hãy đăng nhập tài khoản"})
 
         kind, did, skey = self.auth()
         if p == "/api/logout":
@@ -395,6 +483,70 @@ class Handler(BaseHTTPRequestHandler):
                     remove_item(x["id"])
             return self.reply(200, {"ok": True})
         self.reply(404, {"error": "not found"})
+
+    def account_enter(self, p, data):
+        user = norm_user(data.get("user"))
+        password = str(data.get("password", ""))
+        if not USER_RE.match(user):
+            return self.reply(400, {"error": "Tên tài khoản 3–32 ký tự: chữ thường, số, dấu chấm, gạch"})
+        if len(password) < 8 or len(password) > 200:
+            return self.reply(400, {"error": "Mật khẩu cần ít nhất 8 ký tự"})
+        ip = self.ip()
+        with cond:
+            if p == "/api/account/register":
+                if limited("areg", ip, 8, 86400):
+                    return self.reply(429, {"error": "Tạo quá nhiều tài khoản từ mạng này, thử lại ngày mai"})
+                if user in accounts:
+                    return self.reply(409, {"error": "Tên tài khoản đã có người dùng"})
+                note("areg", ip)
+                salt = secrets.token_hex(16)
+                accounts[user] = {"user": user, "salt": salt, "pw": pw_hash(password, salt), "created": time.time(), "links": {}}
+            else:
+                if limited("alogin", ip, 20, 900) or limited("alogin-user", user, 10, 900):
+                    return self.reply(429, {"error": "Nhập sai quá nhiều lần, đợi 15 phút"})
+                acc = accounts.get(user)
+                if not acc or not hmac.compare_digest(acc["pw"], pw_hash(password, acc["salt"])):
+                    note("alogin", ip)
+                    note("alogin-user", user)
+                    return self.reply(401, {"error": "Sai tên tài khoản hoặc mật khẩu"})
+            token = secrets.token_urlsafe(32)
+            account_sessions[sha(token)] = {"user": user, "created": time.time(), "last": time.time()}
+            rows = device_rows(user, set())
+            save_accounts()
+        return self.reply(200, {"token": token, "user": user, "devices": rows})
+
+    def account_link(self, user, data):
+        did = re.sub(r"\D", "", str(data.get("id", "")))
+        password = str(data.get("password", "")).strip().lower()
+        ip = self.ip()
+        with cond:
+            if limited("login-ip", ip, 20, 900) or limited("login-dev", did, 10, 900):
+                return self.reply(429, {"error": "Nhập sai quá nhiều lần, đợi 15 phút"})
+            d = devices.get(did)
+            if not d or not hmac.compare_digest(d["pw"], pw_hash(password, d["salt"])):
+                note("login-ip", ip)
+                note("login-dev", did)
+                return self.reply(401, {"error": "Sai ID hoặc mật khẩu"})
+            remember_link(user, did, data.get("name"))
+            token = mint_session(did, data.get("name"), user)
+            save_accounts()
+            return self.reply(200, {"token": token, "device": {"id": did, "name": d["name"], "online": self.online(did)}})
+
+    def account_adopt(self, user, data):
+        tokens = data.get("tokens") if isinstance(data.get("tokens"), list) else []
+        added = []
+        with cond:
+            for raw in tokens[:20]:
+                s = sessions.get(sha(str(raw).strip()))
+                if not s or s["device"] not in devices:
+                    continue
+                did = s["device"]
+                remember_link(user, did, s.get("name"))
+                s["account"] = user
+                added.append(did)
+            if added:
+                save_accounts()
+        return self.reply(200, {"ok": True, "linked": added})
 
     def upload(self):
         kind, did, _ = self.auth()

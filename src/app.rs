@@ -151,6 +151,11 @@ pub struct Alex {
     show_pw: bool,
     share_setup: bool,
     share: Arc<Mutex<ShareSlot>>,
+    /// files dropped on the island should upload to connected phones
+    drop_to_phone: bool,
+    /// paths accepted in the last few seconds, so one drop is not sent twice
+    recent_drops: Vec<(std::path::PathBuf, f64)>,
+    file_hover: bool,
 }
 
 #[derive(Clone)]
@@ -175,6 +180,8 @@ struct ShareSlot {
     inbox: Vec<String>,
     /// links sent from a phone (QR scan / pasted)
     urls: Vec<String>,
+    /// files to put back in the send queue after a failed upload
+    restore: Vec<std::path::PathBuf>,
     announce: bool,
     note: String,
     /// ping succeeded; the UI thread saves settings and closes the setup form
@@ -228,6 +235,8 @@ impl Alex {
             });
         }
         let (w, h) = COLLAPSED;
+        let wake = ctx.clone();
+        sys::set_drop_wake(move || wake.request_repaint());
         let share_url_edit = data.settings.share_url.clone();
         let share_setup = share_url_edit.trim().is_empty();
         let st = &data.settings;
@@ -298,12 +307,16 @@ impl Alex {
                 phones: None,
                 inbox: Vec::new(),
                 urls: Vec::new(),
+                restore: Vec::new(),
             })),
             update: {
                 let r = cc.egui_ctx.clone();
                 crate::update::spawn(move || r.request_repaint())
             },
             update_seen: None,
+            drop_to_phone: false,
+            recent_drops: Vec::new(),
+            file_hover: false,
             pdf: std::env::var_os("ALEX_PDF").map(|p| {
                 use crate::pdfview::Mode;
                 let mode = match std::env::var("ALEX_PDF_MODE").as_deref() {
@@ -381,8 +394,9 @@ impl Alex {
     }
 
     fn share_events(&mut self, now: f64) {
-        let (linked, note, announce) = {
+        let (linked, note, announce, restore) = {
             let mut g = self.share.lock().unwrap();
+            let restore = std::mem::take(&mut g.restore);
             let linked = g.linked;
             if linked {
                 g.linked = false;
@@ -399,8 +413,15 @@ impl Alex {
             } else {
                 None
             };
-            (linked, g.note.clone(), announce)
+            (linked, g.note.clone(), announce, restore)
         };
+        if !restore.is_empty() {
+            for p in restore {
+                if !self.send_queue.contains(&p) {
+                    self.send_queue.push(p);
+                }
+            }
+        }
         if linked {
             self.share_setup = false;
             self.toast(now, "Đã kết nối máy chủ", &note);
@@ -460,7 +481,6 @@ impl Alex {
         }
         match announce {
             Some(("sent", link)) => {
-                self.send_queue.clear();
                 if let Some(cb) = self.cb.as_mut() {
                     let _ = cb.set_text(link);
                 }
@@ -471,11 +491,13 @@ impl Alex {
             }
             Some(("saved", name)) => self.toast(now, "Đã nhận file", &truncate(&name, 28)),
             Some(("phones", _)) => {
-                self.send_queue.clear();
-                self.toast(now, "Đã gửi sang điện thoại", "Mở tab Nhận trên web Alex");
+                self.toast(now, "Đã gửi sang điện thoại", "Mở trang Alex trên điện thoại, tab Nhận");
             }
             Some(("fail", e)) => self.toast(now, "Gửi qua Internet", &truncate(&e, 36)),
             _ => {}
+        }
+        if self.drop_to_phone && !self.share_busy() && !self.send_queue.is_empty() && self.account.lock().unwrap().is_some() {
+            self.share_upload(true);
         }
         if self.share_busy() {
             self.ctx.request_repaint_after(Duration::from_millis(200));
@@ -575,12 +597,63 @@ impl Alex {
         });
     }
 
+    fn accept_drop(&mut self, paths: Vec<String>, now: f64) {
+        self.recent_drops.retain(|(_, t)| now - *t < 4.0);
+        let mut fresh = Vec::new();
+        for p in paths {
+            let p = std::path::PathBuf::from(p);
+            if !p.exists() || fresh.contains(&p) || self.recent_drops.iter().any(|(q, _)| q == &p) {
+                continue;
+            }
+            fresh.push(p);
+        }
+        if fresh.is_empty() {
+            return;
+        }
+        let for_tools = self.expanded && self.tab == Tab::Tools;
+        self.dormant = false;
+        self.hidden = false;
+        self.expanded = true;
+        self.hold_until = now + 6.0;
+        self.last_active = now;
+        for p in &fresh {
+            self.recent_drops.push((p.clone(), now));
+        }
+        if for_tools {
+            for p in fresh {
+                if crate::docs::is_supported(&p) && !self.doc_queue.contains(&p) {
+                    self.doc_queue.push(p);
+                }
+            }
+            self.toast(now, "Đã nhận file", "Chọn công cụ ở tab Công cụ");
+            return;
+        }
+        for p in fresh {
+            if !self.send_queue.contains(&p) {
+                self.send_queue.push(p);
+            }
+        }
+        self.tab = Tab::Send;
+        self.drop_to_phone = true;
+        if self.share_busy() {
+            self.toast(now, "Đã nhận file", "Sẽ gửi sang điện thoại ngay sau file đang tải");
+            return;
+        }
+        if self.account.lock().unwrap().is_some() {
+            self.toast(now, "Đang gửi sang điện thoại", "");
+            self.share_upload(true);
+        } else {
+            self.toast(now, "Đã nhận file", "Đang kết nối để gửi sang điện thoại");
+        }
+    }
+
     fn share_upload(&mut self, to_phones: bool) {
         if self.share_busy() || self.send_queue.is_empty() {
             return;
         }
         let Some(acc) = self.account.lock().unwrap().clone() else { return };
-        let paths = self.send_queue.clone();
+        let paths = std::mem::take(&mut self.send_queue);
+        self.drop_to_phone = false;
         let mode = if to_phones {
             share::Mode::Phones
         } else if self.data.settings.share_with_code {
@@ -615,6 +688,7 @@ impl Alex {
                 }
                 Err(e) => {
                     g.view = ShareView::Fail(e);
+                    g.restore = paths;
                     g.announce = true;
                 }
             }
@@ -855,7 +929,7 @@ impl eframe::App for Alex {
         }
 
         // ---------------------------------------------------- hover logic
-        let dragging_files = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let dragging_files = self.file_hover || ctx.input(|i| !i.raw.hovered_files.is_empty());
         let island_rect = Rect::from_min_size(pos2((WIN_W - self.w.x) / 2.0, TOP), vec2(self.w.x, self.h.x));
         let hovered = dragging_files
             || ctx.input(|i| i.pointer.hover_pos()).is_some_and(|p| island_rect.expand(2.0).contains(p));
@@ -881,34 +955,6 @@ impl eframe::App for Alex {
                     ctx.request_repaint_after(Duration::from_millis(420));
                 }
             }
-        }
-
-        let dropped: Vec<String> = ctx.input(|i| {
-            i.raw.dropped_files.iter().map(|f| f.path().display().to_string()).collect()
-        });
-        if !dropped.is_empty() && self.tab == Tab::Send && self.expanded {
-            for p in dropped {
-                let p = std::path::PathBuf::from(p);
-                if !self.send_queue.contains(&p) {
-                    self.send_queue.push(p);
-                }
-            }
-        } else if !dropped.is_empty() && self.tab == Tab::Tools && self.expanded {
-            for p in dropped {
-                let p = std::path::PathBuf::from(p);
-                if crate::docs::is_supported(&p) && !self.doc_queue.contains(&p) {
-                    self.doc_queue.push(p);
-                }
-            }
-        } else if !dropped.is_empty() {
-            for p in dropped {
-                if !self.data.bookmarks.iter().any(|b| b.path == p) {
-                    self.data.bookmarks.push(Bookmark { name: file_name(&p), path: p });
-                }
-            }
-            self.data.save();
-            self.tab = Tab::Marks;
-            self.expanded = true;
         }
 
         if self.toast.as_ref().is_some_and(|t| now >= t.until) {
@@ -990,6 +1036,23 @@ impl eframe::App for Alex {
                 self.region = reg;
             }
         }
+        let mut dropped: Vec<String> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().display().to_string()).filter(|p| !p.is_empty()).collect()
+        });
+        if let Some(h) = self.hwnd {
+            let pad = (32.0 * ppp) as i32;
+            let hit = sys::track_drop_target(h, reg, pad, !hide);
+            self.file_hover = hit.hovering;
+            dropped.extend(hit.paths);
+        } else {
+            self.file_hover = false;
+        }
+        if self.file_hover && self.h.x < 120.0 {
+            self.tab = Tab::Send;
+            self.expanded = true;
+            self.dormant = false;
+        }
+        self.accept_drop(dropped, now);
         if hide {
             return;
         }
@@ -1000,6 +1063,9 @@ impl eframe::App for Alex {
         let fade = if !self.dormant { 1.0 } else if self.toast.is_some() { 0.85 } else { 0.4 };
         painter.rect_filled(rect, radius, ISLAND.gamma_multiply(fade));
         painter.rect_stroke(rect.shrink(0.5), radius, Stroke::new(1.0, Color32::from_rgba_unmultiplied(70, 130, 255, 70).gamma_multiply(fade)), StrokeKind::Inside);
+        if self.file_hover {
+            painter.rect_stroke(rect.shrink(1.5), radius, Stroke::new(2.0, logo::C1), StrokeKind::Inside);
+        }
         if rect.width() < 60.0 && self.toast.is_none() {
             // the dot: just the mark
             logo::paint_mark(&painter, Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), fade + 0.1);

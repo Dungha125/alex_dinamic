@@ -1,5 +1,6 @@
 //! Thin Win32 helpers: window placement, hit-region, tray icon, autostart, misc.
-use std::sync::{mpsc::Sender, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc::Sender, Mutex, OnceLock};
 use windows::core::{w, HSTRING, PCWSTR};
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{CreateRectRgn, SetWindowRgn};
@@ -292,6 +293,260 @@ unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT 
         }
     }
     unsafe { CallNextHookEx(None, code, wp, lp) }
+}
+
+// ---------------------------------------------------------------- file drop
+// The island window is per-pixel transparent, and Windows will not deliver a file
+// drag to a window whose pixels are transparent (the cursor stays "unavailable").
+// A color-keyed layered window over the island is invisible but is a real drop
+// target. It only claims the hit while the mouse button is already down, so
+// ordinary clicks still fall through to the island.
+pub struct DropHit {
+    pub hovering: bool,
+    pub paths: Vec<String>,
+}
+
+struct DropBox {
+    hover: bool,
+    paths: Vec<String>,
+    hwnd: isize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    shown: bool,
+}
+
+static DROP_BOX: Mutex<DropBox> = Mutex::new(DropBox {
+    hover: false,
+    paths: Vec::new(),
+    hwnd: 0,
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+    shown: false,
+});
+static DROP_ACCEPT: AtomicBool = AtomicBool::new(false);
+static DROP_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+pub fn set_drop_wake(cb: impl Fn() + Send + Sync + 'static) {
+    let _ = DROP_WAKE.set(Box::new(cb));
+}
+
+fn wake_drop() {
+    if let Some(cb) = DROP_WAKE.get() {
+        cb();
+    }
+}
+
+fn hdrop_format() -> windows::Win32::System::Com::FORMATETC {
+    use windows::Win32::System::Com::{DVASPECT_CONTENT, TYMED_HGLOBAL};
+    use windows::Win32::System::Ole::CF_HDROP;
+    windows::Win32::System::Com::FORMATETC {
+        cfFormat: CF_HDROP.0,
+        ptd: std::ptr::null_mut(),
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    }
+}
+
+fn paths_from(data: &windows::Win32::System::Com::IDataObject) -> Vec<String> {
+    use windows::Win32::System::Ole::ReleaseStgMedium;
+    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
+    let fmt = hdrop_format();
+    let mut medium = match unsafe { data.GetData(&fmt) } {
+        Ok(m) => m,
+        Err(_) => return Vec::new(),
+    };
+    let hdrop = HDROP(unsafe { medium.u.hGlobal.0 });
+    let mut out = Vec::new();
+    unsafe {
+        let n = DragQueryFileW(hdrop, 0xFFFFFFFF, None);
+        for i in 0..n {
+            let len = DragQueryFileW(hdrop, i, None) as usize;
+            let mut buf = vec![0u16; len + 1];
+            let got = DragQueryFileW(hdrop, i, Some(&mut buf)) as usize;
+            if got > 0 {
+                out.push(String::from_utf16_lossy(&buf[..got.min(buf.len())]));
+            }
+        }
+        ReleaseStgMedium(&mut medium);
+    }
+    out
+}
+
+#[windows::core::implement(windows::Win32::System::Ole::IDropTarget)]
+struct IslandDrop;
+
+impl windows::Win32::System::Ole::IDropTarget_Impl for IslandDrop_Impl {
+    fn DragEnter(
+        &self,
+        data: windows::core::Ref<windows::Win32::System::Com::IDataObject>,
+        _: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        _: &POINTL,
+        effect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows::core::Result<()> {
+        use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_NONE};
+        let ok = data.as_ref().is_some_and(|d| unsafe { d.QueryGetData(&hdrop_format()) }.is_ok());
+        DROP_ACCEPT.store(ok, Ordering::Relaxed);
+        unsafe {
+            if !effect.is_null() {
+                *effect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            }
+        }
+        if ok {
+            if let Ok(mut g) = DROP_BOX.lock() {
+                g.hover = true;
+            }
+            wake_drop();
+        }
+        Ok(())
+    }
+
+    fn DragOver(
+        &self,
+        _: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        _: &POINTL,
+        effect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows::core::Result<()> {
+        use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_NONE};
+        unsafe {
+            if !effect.is_null() {
+                *effect = if DROP_ACCEPT.load(Ordering::Relaxed) { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            }
+        }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> windows::core::Result<()> {
+        DROP_ACCEPT.store(false, Ordering::Relaxed);
+        if let Ok(mut g) = DROP_BOX.lock() {
+            g.hover = false;
+        }
+        wake_drop();
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        data: windows::core::Ref<windows::Win32::System::Com::IDataObject>,
+        _: windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS,
+        _: &POINTL,
+        effect: *mut windows::Win32::System::Ole::DROPEFFECT,
+    ) -> windows::core::Result<()> {
+        use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_NONE};
+        let paths = data.as_ref().map(paths_from).unwrap_or_default();
+        let ok = !paths.is_empty();
+        unsafe {
+            if !effect.is_null() {
+                *effect = if ok { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+            }
+        }
+        DROP_ACCEPT.store(false, Ordering::Relaxed);
+        if let Ok(mut g) = DROP_BOX.lock() {
+            g.hover = false;
+            g.paths.extend(paths);
+        }
+        wake_drop();
+        Ok(())
+    }
+}
+
+unsafe extern "system" fn drop_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if msg == WM_NCHITTEST {
+        let dragging = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(windows::Win32::UI::Input::KeyboardAndMouse::VK_LBUTTON.0 as i32) } < 0;
+        return LRESULT(if dragging { HTCLIENT as isize } else { HTTRANSPARENT as isize });
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+}
+
+fn ensure_drop_window(owner: HWND) -> Option<HWND> {
+    use windows::Win32::Graphics::Gdi::CreateSolidBrush;
+    use windows::Win32::System::Ole::{OleInitialize, RegisterDragDrop};
+    let mut box_ = DROP_BOX.lock().ok()?;
+    if box_.hwnd != 0 {
+        return Some(HWND(box_.hwnd as *mut _));
+    }
+    unsafe {
+        let _ = OleInitialize(None);
+        let hinst = GetModuleHandleW(None).unwrap_or_default();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(drop_proc),
+            hInstance: hinst.into(),
+            lpszClassName: w!("AlexDrop"),
+            hbrBackground: CreateSolidBrush(COLORREF(0x00FF00FF)),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            w!("AlexDrop"),
+            w!("AlexDrop"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            Some(owner),
+            None,
+            Some(hinst.into()),
+            None,
+        ) else {
+            return None;
+        };
+        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0x00FF00FF), 0, LWA_COLORKEY);
+        if std::env::var_os("ALEX_ALLOW_CAPTURE").is_none() {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+        }
+        let target: windows::Win32::System::Ole::IDropTarget = IslandDrop.into();
+        if RegisterDragDrop(hwnd, &target).is_err() {
+            let _ = DestroyWindow(hwnd);
+            return None;
+        }
+        box_.hwnd = hwnd.0 as isize;
+        Some(hwnd)
+    }
+}
+
+/// `client` is the island rectangle in the owner window's client pixels.
+/// `pad` grows the (invisible) catch area around it. Pass `visible = false` to hide it.
+pub fn track_drop_target(owner: HWND, client: (i32, i32, i32, i32), pad: i32, visible: bool) -> DropHit {
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    let Some(hwnd) = ensure_drop_window(owner) else {
+        return DropHit { hovering: false, paths: Vec::new() };
+    };
+    let (prev_shown, prev_x, prev_y, prev_w, prev_h) = {
+        let g = DROP_BOX.lock().unwrap_or_else(|e| e.into_inner());
+        (g.shown, g.x, g.y, g.w, g.h)
+    };
+    let (x, y, w, h) = if visible && client.2 > client.0 && client.3 > client.1 {
+        let mut pt = POINT { x: client.0, y: client.1 };
+        unsafe { let _ = ClientToScreen(owner, &mut pt); }
+        let x = pt.x - pad;
+        let y = (pt.y - pad).max(0);
+        (x, y, (client.2 - client.0) + pad * 2, (client.3 - client.1) + pad * 2)
+    } else {
+        (prev_x, prev_y, 0, 0)
+    };
+    let show = visible && w > 0 && h > 0;
+    if show != prev_shown || x != prev_x || y != prev_y || w != prev_w || h != prev_h {
+        unsafe {
+            if show {
+                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            } else {
+                let _ = ShowWindow(hwnd, SW_HIDE);
+            }
+        }
+    }
+    let mut g = DROP_BOX.lock().unwrap_or_else(|e| e.into_inner());
+    g.x = x;
+    g.y = y;
+    g.w = w;
+    g.h = h;
+    g.shown = show;
+    DropHit { hovering: g.hover, paths: std::mem::take(&mut g.paths) }
 }
 
 pub fn spawn_double_ctrl(cb: impl Fn() + Send + Sync + 'static) {

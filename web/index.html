@@ -113,7 +113,23 @@
   <!-- ======================= SETTINGS ======================= -->
   <section id="page-set" class="hidden">
     <h1>Máy tính</h1>
-    <p class="sub">Kết nối bằng ID và mật khẩu hiện trong Alex trên máy tính. Kết nối được nhiều máy.</p>
+    <p class="sub">Một tài khoản giữ danh sách máy. Đăng nhập trên điện thoại khác là thấy lại, không phải nhập ID từng lần.</p>
+    <div class="card" id="accountCard">
+      <h2>Tài khoản</h2>
+      <div id="accountOut">
+        <input class="field" id="accUser" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="Tên tài khoản">
+        <input class="field mt" id="accPw" type="password" autocomplete="current-password" placeholder="Mật khẩu (ít nhất 8 ký tự)">
+        <div class="row mt">
+          <button class="btn" id="accLogin">Đăng nhập</button>
+          <button class="btn ghost" id="accReg">Tạo tài khoản</button>
+        </div>
+        <div class="msg" id="accMsg"></div>
+      </div>
+      <div id="accountIn" class="hidden">
+        <p class="sub" style="margin:0">Đang đăng nhập <b id="accName"></b>. Máy tính gắn với tài khoản này hiện trên mọi điện thoại đăng nhập cùng tên.</p>
+        <button class="btn ghost mt" id="accLogout">Đăng xuất tài khoản</button>
+      </div>
+    </div>
     <div class="card">
       <h2>Máy tính đã kết nối</h2>
       <div class="hist" id="devices"></div>
