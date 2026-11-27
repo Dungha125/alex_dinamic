@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070910">
+<meta name="description" content="Alex: gửi và nhận file giữa điện thoại và máy tính, mã hoá đầu cuối.">
+<meta name="referrer" content="no-referrer">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Alex">
+<title>Alex</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <svg width="30" height="30" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#00e5ff"/><stop offset=".5" stop-color="#2979ff"/><stop offset="1" stop-color="#aa00ff"/></linearGradient></defs>
+    <polygon points="50,2 91.6,26 91.6,74 50,98 8.4,74 8.4,26" fill="url(#lg)"/><polygon points="50,8 86.4,29 86.4,71 50,92 13.6,71 13.6,29" fill="#080c1a"/>
+    <polygon points="18,82 42,18 58,18 82,82 66,82 50,38 34,82" fill="url(#lg)"/><polygon points="41,62 59,62 62,72 38,72" fill="url(#lg)"/></svg>
+  <b>ALEX</b>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Đang kết nối…</span></div>
+</header>
+
+<main>
+  <!-- ======================= SEND ======================= -->
+  <section id="page-send">
+    <h1>Gửi</h1>
+    <p class="sub">Mã hoá ngay trên điện thoại rồi mới tải lên. Người nhận dùng mã 6 số, link hoặc QR.</p>
+
+    <div class="card" id="sendForm">
+      <div class="pick">
+        <label><input type="file" id="pickMedia" accept="image/*,video/*" multiple><div class="ico">🖼</div><span>Ảnh, video</span><small>Từ thư viện</small></label>
+        <label><input type="file" id="pickFile" multiple><div class="ico">📄</div><span>File</span><small>Tài liệu, mọi loại</small></label>
+        <label><input type="file" id="pickCamera" accept="image/*" capture="environment"><div class="ico">📷</div><span>Chụp ảnh</span><small>Mở camera</small></label>
+        <button class="tile" id="pickText" type="button"><div class="ico">✍</div><span style="font-weight:600;font-size:15px">Gõ chữ</span><small style="color:var(--dim);font-size:12px;margin-top:-4px">Gửi một đoạn chữ</small></button>
+      </div>
+      <textarea id="textBox" class="hidden mt" rows="4" placeholder="Nhập chữ cần gửi…"></textarea>
+      <div class="queue" id="queue"></div>
+      <div class="switch">
+        <div>Kèm mã 6 số<small>Tiện để nhập tay. Máy chủ của bạn giữ khoá cho file này.</small></div>
+        <label class="toggle"><input type="checkbox" id="withCode" checked><i></i></label>
+      </div>
+      <button class="btn mt" id="sendBtn" disabled>Tải lên</button>
+      <div class="bar hidden" id="sendBar"><i id="sendFill"></i></div>
+      <div class="msg" id="sendMsg"></div>
+    </div>
+
+    <div class="card result hidden" id="sendResult">
+      <h2 id="resTitle">Đã tải lên</h2>
+      <div id="resCodeWrap"><div style="color:var(--dim);font-size:13px">Mã nhận</div><div class="bigcode" id="resCode">000000</div></div>
+      <div class="qr" id="resQr"></div>
+      <div class="link" id="resLink"></div>
+      <div class="row mt">
+        <button class="btn ghost small" id="copyLink">Chép link</button>
+        <button class="btn ghost small" id="shareLink">Chia sẻ</button>
+      </div>
+      <div class="row mt">
+        <button class="btn ghost small" id="deleteNow">Xoá ngay</button>
+        <button class="btn small" id="sendMore">Gửi tiếp</button>
+      </div>
+      <div class="msg" id="resExpire"></div>
+    </div>
+  </section>
+
+  <!-- ======================= RECEIVE ======================= -->
+  <section id="page-recv" class="hidden">
+    <h1>Nhận</h1>
+    <p class="sub">Nhập mã 6 số hoặc dán link người gửi đưa cho bạn.</p>
+    <div class="card" id="recvForm">
+      <input class="code" id="codeInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
+      <button class="btn mt" id="recvBtn" disabled>Nhận</button>
+      <div class="row mt">
+        <button class="btn ghost small" id="pasteLink">Dán link</button>
+      </div>
+      <div class="bar hidden" id="recvBar"><i id="recvFill"></i></div>
+      <div class="msg" id="recvMsg"></div>
+    </div>
+    <div class="card hidden" id="recvResult">
+      <h2>Đã nhận</h2>
+      <div class="preview" id="preview"></div>
+      <div class="row mt">
+        <a class="btn" id="saveBtn">Lưu</a>
+        <button class="btn ghost" id="shareFile">Chia sẻ</button>
+      </div>
+      <div class="row mt hidden" id="copyTextRow"><button class="btn ghost" id="copyText">Chép chữ</button></div>
+      <div class="msg">Giải mã ngay trên máy bạn · máy chủ không đọc được nội dung khi nhận bằng link.</div>
+    </div>
+  </section>
+
+  <!-- ======================= HISTORY ======================= -->
+  <section id="page-hist" class="hidden">
+    <h1>Đã gửi</h1>
+    <p class="sub">Lưu trên chính điện thoại này. File tự xoá khỏi máy chủ khi hết hạn.</p>
+    <div class="card"><div class="hist" id="hist"></div></div>
+  </section>
+
+  <!-- ======================= SETTINGS ======================= -->
+  <section id="page-set" class="hidden">
+    <h1>Cài đặt</h1>
+    <div class="card">
+      <h2>Mã truy cập máy chủ</h2>
+      <p class="sub" style="margin-bottom:10px">Cần để tải lên. Nhận file thì không cần. Lấy mã ở máy chủ (/etc/alex-share.env) hoặc trong Alex trên máy tính.</p>
+      <input class="field" id="tokenInput" type="password" autocomplete="off" placeholder="Dán mã truy cập">
+      <div class="row mt">
+        <button class="btn small" id="saveToken">Lưu & kiểm tra</button>
+        <button class="btn ghost small" id="showToken">Hiện</button>
+      </div>
+      <div class="msg" id="tokenMsg"></div>
+    </div>
+    <div class="card install hidden" id="installCard">
+      <div class="meta"><b>Cài lên màn hình chính</b><small>Mở nhanh như một ứng dụng.</small></div>
+      <button class="btn small" id="installBtn">Cài</button>
+    </div>
+    <div class="card install" id="iosHint" style="display:none">
+      <div class="meta"><b>Thêm vào Màn hình chính</b><small>Trên iPhone: bấm nút Chia sẻ của Safari → “Thêm vào MH chính”.</small></div>
+    </div>
+    <div class="card install" id="winCard">
+      <div class="meta"><b>Alex cho Windows</b><small id="winVer">Hòn đảo nổi ở mép trên màn hình.</small></div>
+      <a class="btn small" id="winDl" href="download/Alex-Setup-latest.exe">Tải về</a>
+    </div>
+    <footer>Alex · mã hoá AES-256-GCM · <span id="apiHost"></span></footer>
+  </section>
+</main>
+
+<nav>
+  <button data-page="send" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M5 12l7-7 7 7"/></svg>Gửi</button>
+  <button data-page="recv"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"/></svg>Nhận</button>
+  <button data-page="hist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Đã gửi</button>
+  <button data-page="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.6 1.6 0 0 0-1-1.5 1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.6 1.6 0 0 0 1.5-1 1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1z"/></svg>Cài đặt</button>
+</nav>
+<div class="toast" id="toast"></div>
+
+<script src="config.js"></script>
+<script src="qr.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

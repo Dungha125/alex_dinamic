@@ -1,0 +1,10 @@
+{
+    "version":  "0.1.0",
+    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.1.0.exe",
+    "sha256":  "0c10fe370049cd4c974ae02d975be6de243668f59bda093fe51ccecd02bf1ae2",
+    "size":  5047191,
+    "sig":  "nrGTYTmEX8hmn2JgCoT49JVH32EqWJ0qmXFcRgCH1DWgy3oEqF1eGWPLiOVYH7uOZkW-AepNRW5H_qySJ4vgAg",
+    "notes":  "Bản đầu tiên: đảo nổi, clipboard, gửi file LAN và qua Internet, công cụ PDF/Word/Excel, HEIC sang JPG, tự cập nhật.",
+    "date":  "2026-11-27",
+    "github":  ""
+}

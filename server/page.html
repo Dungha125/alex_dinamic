@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Alex · Nhận file</title>
+<style>
+  :root { --bg:#070910; --card:#141824; --line:#232a3d; --text:#eef1fa; --dim:#8c96af; --c1:#00e5ff; --c2:#2979ff; --c3:#aa00ff; --ok:#3cd282; --bad:#e6505a; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; background:radial-gradient(1200px 600px at 50% -10%, #142046 0%, var(--bg) 60%); color:var(--text);
+         font:15px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; display:flex; align-items:center; justify-content:center; padding:24px 16px; }
+  .card { width:100%; max-width:420px; background:var(--card); border:1px solid var(--line); border-radius:20px; padding:28px 24px; box-shadow:0 20px 60px #0008; }
+  .brand { display:flex; align-items:center; gap:10px; margin-bottom:22px; }
+  .brand b { font-size:20px; letter-spacing:3px; background:linear-gradient(90deg,var(--c1),var(--c2),var(--c3)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  p { margin:0 0 16px; color:var(--dim); }
+  input { width:100%; font:600 28px/1 "Segoe UI", system-ui, sans-serif; letter-spacing:10px; text-align:center; padding:14px; border-radius:14px;
+          border:1px solid var(--line); background:#0c0f18; color:var(--text); outline:none; }
+  input:focus { border-color:var(--c2); }
+  button, .btn { display:block; width:100%; margin-top:14px; padding:13px; border:0; border-radius:14px; font:600 16px "Segoe UI", system-ui, sans-serif;
+                 color:#fff; background:linear-gradient(90deg,var(--c2),var(--c3)); cursor:pointer; text-align:center; text-decoration:none; }
+  button:disabled { opacity:.5; cursor:default; }
+  .file { display:flex; gap:12px; align-items:center; background:#0c0f18; border:1px solid var(--line); border-radius:14px; padding:12px; margin:14px 0 0; }
+  .ext { width:44px; height:44px; border-radius:10px; display:grid; place-items:center; font:700 11px sans-serif; background:linear-gradient(135deg,var(--c2),var(--c3)); flex:none; }
+  .name { font-weight:600; word-break:break-all; }
+  .bar { height:6px; background:#ffffff14; border-radius:3px; overflow:hidden; margin-top:14px; }
+  .bar i { display:block; height:100%; width:0; background:linear-gradient(90deg,var(--c1),var(--c2)); transition:width .15s; }
+  .msg { margin-top:12px; font-size:14px; color:var(--dim); min-height:20px; }
+  .msg.bad { color:var(--bad); } .msg.ok { color:var(--ok); }
+  .foot { margin-top:22px; font-size:12px; color:var(--dim); text-align:center; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="brand">
+    <svg width="30" height="30" viewBox="0 0 100 100" aria-hidden="true"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#00e5ff"/><stop offset=".5" stop-color="#2979ff"/><stop offset="1" stop-color="#aa00ff"/></linearGradient></defs>
+      <polygon points="50,2 91.6,26 91.6,74 50,98 8.4,74 8.4,26" fill="url(#g)"/><polygon points="50,8 86.4,29 86.4,71 50,92 13.6,71 13.6,29" fill="#080c1a"/>
+      <polygon points="18,82 42,18 58,18 82,82 66,82 50,38 34,82" fill="url(#g)"/><polygon points="41,62 59,62 62,72 38,72" fill="url(#g)"/></svg>
+    <b>ALEX</b>
+  </div>
+
+  <div id="ask">
+    <h1>Nhận file</h1>
+    <p>Nhập mã 6 số người gửi đưa cho bạn.</p>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
+    <button id="go" disabled>Nhận</button>
+  </div>
+
+  <div id="got" class="hidden">
+    <h1>File đã sẵn sàng</h1>
+    <p id="priv">Giải mã ngay trên máy bạn. Khoá chỉ nằm trong link, máy chủ không đọc được nội dung.</p>
+    <div class="file"><div class="ext" id="ext">FILE</div><div><div class="name" id="name">…</div><div class="msg" id="size" style="margin:0"></div></div></div>
+    <a class="btn hidden" id="save">Lưu file</a>
+  </div>
+
+  <div class="bar hidden" id="bar"><i id="fill"></i></div>
+  <div class="msg" id="msg"></div>
+  <div class="foot">File tự xoá sau thời hạn · Mã hoá AES-256-GCM</div>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const msg = (t, cls) => { $("msg").textContent = t; $("msg").className = "msg " + (cls || ""); };
+const human = n => n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(0) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
+const b64u = s => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), c => c.charCodeAt(0));
+
+async function download(id) {
+  const r = await fetch("/api/blob/" + id);
+  if (!r.ok) { let e = "Không tải được file"; try { e = (await r.json()).error || e; } catch (_) {} throw new Error(e); }
+  const total = +r.headers.get("Content-Length") || 0;
+  const buf = new Uint8Array(total);
+  const reader = r.body.getReader();
+  let got = 0;
+  $("bar").classList.remove("hidden");
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf.set(value, got); got += value.length;
+    if (total) $("fill").style.width = (got / total * 100).toFixed(1) + "%";
+  }
+  if (got !== total) throw new Error("Tải về không đủ dữ liệu");
+  return buf;
+}
+
+// format: "ALXS1" | frames [u32 BE len][AES-GCM ciphertext+tag]; frame 0 = metadata (AAD "meta"),
+// then data frames (AAD = 1 on the last frame, else 0); IV = 4 zero bytes + u64 BE frame index.
+async function decrypt(buf, keyBytes) {
+  if (!window.crypto || !crypto.subtle) throw new Error("Trình duyệt cần mở trang qua HTTPS để giải mã");
+  if (new TextDecoder().decode(buf.subarray(0, 5)) !== "ALXS1") throw new Error("File không đúng định dạng");
+  const key = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, ["decrypt"]);
+  const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  let pos = 5, ctr = 0, meta = null;
+  const parts = [];
+  while (pos < buf.length) {
+    const len = dv.getUint32(pos); const start = pos + 4; const end = start + len;
+    if (end > buf.length) throw new Error("File bị cắt cụt");
+    const iv = new Uint8Array(12); new DataView(iv.buffer).setBigUint64(4, BigInt(ctr));
+    const aad = ctr === 0 ? new TextEncoder().encode("meta") : new Uint8Array([end === buf.length ? 1 : 0]);
+    let plain;
+    try { plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv, additionalData: aad, tagLength: 128 }, key, buf.subarray(start, end)); }
+    catch (_) { throw new Error("Sai khoá hoặc file đã bị sửa đổi"); }
+    if (ctr === 0) meta = JSON.parse(new TextDecoder().decode(plain)); else parts.push(plain);
+    pos = end; ctr++;
+    $("fill").style.width = (pos / buf.length * 100).toFixed(1) + "%";
+  }
+  if (!meta || ctr < 2) throw new Error("File không đầy đủ");
+  return { meta, blob: new Blob(parts, { type: meta.mime || "application/octet-stream" }) };
+}
+
+async function receive(id, keyB64, viaCode) {
+  try {
+    $("ask").classList.add("hidden");
+    $("priv").textContent = viaCode
+      ? "Giải mã ngay trên máy bạn. Người gửi bật mã 6 số, nên máy chủ đang giữ khoá của file này."
+      : "Giải mã ngay trên máy bạn. Khoá chỉ nằm trong link, máy chủ không đọc được nội dung.";
+    msg("Đang tải…");
+    const buf = await download(id);
+    msg("Đang giải mã…");
+    const { meta, blob } = await decrypt(buf, b64u(keyB64));
+    const name = String(meta.name || "file").replace(/[\\/:*?"<>|]/g, "_");
+    $("got").classList.remove("hidden");
+    $("name").textContent = name;
+    $("size").textContent = human(blob.size);
+    const ext = name.includes(".") ? name.split(".").pop().slice(0, 4).toUpperCase() : "FILE";
+    $("ext").textContent = ext;
+    const a = $("save");
+    a.href = URL.createObjectURL(blob); a.download = name; a.classList.remove("hidden");
+    $("bar").classList.add("hidden");
+    msg("Xong. Bấm “Lưu file” để lưu về máy.", "ok");
+  } catch (e) {
+    $("bar").classList.add("hidden");
+    msg(e.message || String(e), "bad");
+    $("ask").classList.remove("hidden");
+  }
+}
+
+const m = location.pathname.match(/^\/s\/([A-Za-z0-9_-]{22})$/);
+const frag = location.hash.slice(1);
+if (m && /^[A-Za-z0-9_-]{43}$/.test(frag)) {
+  receive(m[1], frag);
+} else if (m) {
+  msg("Link thiếu khoá giải mã. Hãy mở đúng link đầy đủ người gửi đưa.", "bad");
+}
+$("code").addEventListener("input", e => { e.target.value = e.target.value.replace(/\D/g, "").slice(0, 6); $("go").disabled = e.target.value.length !== 6; });
+$("code").addEventListener("keydown", e => { if (e.key === "Enter" && !$("go").disabled) $("go").click(); });
+$("go").addEventListener("click", async () => {
+  $("go").disabled = true; msg("Đang tìm…");
+  try {
+    const r = await fetch("/api/code/" + $("code").value);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Mã không đúng");
+    await receive(j.id, j.key, true);
+  } catch (e) { msg(e.message, "bad"); $("go").disabled = false; }
+});
+</script>
+</body>
+</html>
