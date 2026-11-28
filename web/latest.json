@@ -1,10 +1,10 @@
 {
-    "version":  "0.3.0",
-    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.3.0.exe",
-    "sha256":  "e52273cfe4ee1c0fdf6c6843b50e18df954fb937bd4d603b8ec172c07843cb36",
-    "size":  5061969,
-    "sig":  "k8QoFhT69pl2Xl3TRvtHygJoitI80CmeJyWUJXqWueE1aq4K6CxuUGMh_DA1kn7WAvWr-Lyi_KyBEJJcq-JZAA",
-    "notes":  "Tài khoản web giữ các máy đã kết nối (đăng nhập lại trên điện thoại khác là thấy đủ máy); thả file lên đảo gửi thẳng sang điện thoại; sửa camera và quét QR trên web điện thoại.",
-    "date":  "2026-11-27",
-    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.3.0"
+    "version":  "0.5.0",
+    "url":  "https://alex.tailieuptit.com/download/Alex-Setup-0.5.0.exe",
+    "sha256":  "2953f378d957e1c83d632b1a5738fa6b1906278b3b723e70c0753bfbcd4c8171",
+    "size":  5077497,
+    "sig":  "6uQeK_pnAHlCcJX74HFFhZoi2mml1rPp3pIa6gxwqpqFkAJhIf38zlgqfhl9ChArdrUdj4hfs4ZNHhY6E3J2DA",
+    "notes":  "YouTube trên đảo: nhận bài đang phát trên tab YouTube, thả tim để lưu, mở lại bằng trình phát chính thức của YouTube và điều khiển phát/dừng đúng bài đã lưu.",
+    "date":  "2026-11-29",
+    "github":  "https://github.com/Dungha125/alex_dinamic/releases/tag/v0.5.0"
 }
