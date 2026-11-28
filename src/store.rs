@@ -14,6 +14,14 @@ pub struct Bookmark {
     pub path: String,
 }
 
+/// A YouTube video saved from the island. Playback uses the official player, not a downloaded file.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Track {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Water {
     pub goal: u32,
@@ -82,6 +90,7 @@ pub struct Data {
     pub bookmarks: Vec<Bookmark>,
     pub pins: Vec<String>,
     pub water: Water,
+    pub tracks: Vec<Track>,
 }
 
 fn path() -> PathBuf {

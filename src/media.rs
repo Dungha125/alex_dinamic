@@ -20,6 +20,9 @@ pub enum MediaCmd {
     PlayPause,
     Next,
     Prev,
+    /// Pause or resume the session whose title matches, so the island can control a saved track
+    /// while another app is the current session.
+    ToggleTitle(String),
 }
 
 pub type Shared = Arc<Mutex<Option<MediaInfo>>>;
@@ -35,13 +38,21 @@ pub fn spawn(state: Shared, repaint: impl Fn() + Send + 'static) -> Sender<Media
             let mut wait = Duration::from_millis(1500);
             match rx.recv_timeout(wait) {
                 Ok(cmd) => {
-                    if let Ok(s) = mgr.GetCurrentSession() {
-                        let op = match cmd {
-                            MediaCmd::PlayPause => s.TryTogglePlayPauseAsync(),
-                            MediaCmd::Next => s.TrySkipNextAsync(),
-                            MediaCmd::Prev => s.TrySkipPreviousAsync(),
-                        };
-                        let _ = op.and_then(|o| o.join());
+                    match cmd {
+                        MediaCmd::ToggleTitle(title) => {
+                            let _ = toggle_title(&mgr, &title);
+                        }
+                        other => {
+                            if let Ok(s) = mgr.GetCurrentSession() {
+                                let op = match other {
+                                    MediaCmd::PlayPause => s.TryTogglePlayPauseAsync(),
+                                    MediaCmd::Next => s.TrySkipNextAsync(),
+                                    MediaCmd::Prev => s.TrySkipPreviousAsync(),
+                                    MediaCmd::ToggleTitle(_) => unreachable!(),
+                                };
+                                let _ = op.and_then(|o| o.join());
+                            }
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(250));
                     wait = Duration::ZERO;
@@ -60,6 +71,34 @@ pub fn spawn(state: Shared, repaint: impl Fn() + Send + 'static) -> Sender<Media
         }
     });
     tx
+}
+
+fn titles_match(a: &str, b: &str) -> bool {
+    let a = a.trim().to_lowercase();
+    let b = b.trim().to_lowercase();
+    if a.is_empty() || b.is_empty() {
+        return false;
+    }
+    if a == b {
+        return true;
+    }
+    let (short, long) = if a.len() <= b.len() { (&a, &b) } else { (&b, &a) };
+    short.chars().count() >= 6 && long.contains(short.as_str())
+}
+
+fn toggle_title(mgr: &Manager, title: &str) -> bool {
+    let Ok(sessions) = mgr.GetSessions() else { return false };
+    let Ok(n) = sessions.Size() else { return false };
+    for i in 0..n {
+        let Ok(s) = sessions.GetAt(i) else { continue };
+        let Ok(props) = s.TryGetMediaPropertiesAsync().and_then(|op| op.join()) else { continue };
+        let Ok(got) = props.Title() else { continue };
+        if titles_match(&got.to_string(), title) {
+            let _ = s.TryTogglePlayPauseAsync().and_then(|op| op.join());
+            return true;
+        }
+    }
+    false
 }
 
 fn read(mgr: &Manager) -> Option<MediaInfo> {

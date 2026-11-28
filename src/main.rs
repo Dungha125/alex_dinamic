@@ -4,6 +4,7 @@ mod clip;
 mod docs;
 mod logo;
 mod media;
+mod music;
 mod net;
 mod pdfedit;
 mod pdfsig;

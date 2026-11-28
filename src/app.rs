@@ -1,9 +1,10 @@
 use crate::clip::{self, ClipItem, ClipKind};
 use crate::logo;
 use crate::media::{self, MediaCmd, MediaInfo};
+use crate::music;
 use crate::net::{self, Status};
 use crate::share;
-use crate::store::{Bookmark, Data, Note};
+use crate::store::{Bookmark, Data, Note, Track};
 use crate::sys::{self, TrayCmd};
 use crate::{WIN_H, WIN_W};
 use eframe::egui::{
@@ -31,7 +32,8 @@ const DIM: Color32 = Color32::from_rgb(140, 150, 175);
 const ACCENT: Color32 = Color32::from_rgb(45, 160, 255);
 
 const COLLAPSED: (f32, f32) = (196.0, 36.0);
-const COLLAPSED_MEDIA: (f32, f32) = (290.0, 36.0);
+const COLLAPSED_MEDIA: (f32, f32) = (368.0, 36.0);
+const HEART: Color32 = Color32::from_rgb(255, 90, 120);
 const TOAST: (f32, f32) = (300.0, 44.0);
 const EXPANDED: (f32, f32) = (624.0, 410.0);
 const DOT: (f32, f32) = (24.0, 24.0);
@@ -156,6 +158,15 @@ pub struct Alex {
     /// paths accepted in the last few seconds, so one drop is not sent twice
     recent_drops: Vec<(std::path::PathBuf, f64)>,
     file_hover: bool,
+
+    music_at: usize,
+    player_pid: Option<u32>,
+    playing_id: Option<String>,
+    heart_rx: Option<std::sync::mpsc::Receiver<music::HeartDone>>,
+    yt_at: f64,
+    yt_for: String,
+    yt_now: bool,
+    over_bar_btn: bool,
 }
 
 #[derive(Clone)]
@@ -317,6 +328,14 @@ impl Alex {
             drop_to_phone: false,
             recent_drops: Vec::new(),
             file_hover: false,
+            music_at: 0,
+            player_pid: None,
+            playing_id: None,
+            heart_rx: None,
+            yt_at: 0.0,
+            yt_for: String::new(),
+            yt_now: false,
+            over_bar_btn: false,
             pdf: std::env::var_os("ALEX_PDF").map(|p| {
                 use crate::pdfview::Mode;
                 let mode = match std::env::var("ALEX_PDF_MODE").as_deref() {
@@ -907,8 +926,15 @@ impl eframe::App for Alex {
         self.ingest_clips(now);
         self.net_events(now);
         self.share_events(now);
+        self.poll_heart(&ctx, now);
         self.water_rollover();
         let media = self.media.lock().unwrap().clone();
+        let title_now = media.as_ref().map(|m| m.title.as_str()).unwrap_or("");
+        if now - self.yt_at > 1.0 || title_now != self.yt_for {
+            self.yt_at = now;
+            self.yt_for = title_now.to_string();
+            self.yt_now = media.as_ref().is_some_and(|m| music::is_youtube(&m.title, &m.app));
+        }
 
         // ---------------------------------------------------- double Ctrl
         if self.ctrl_flag.swap(false, Ordering::Relaxed) {
@@ -929,6 +955,9 @@ impl eframe::App for Alex {
         }
 
         // ---------------------------------------------------- hover logic
+        if self.expanded {
+            self.over_bar_btn = false;
+        }
         let dragging_files = self.file_hover || ctx.input(|i| !i.raw.hovered_files.is_empty());
         let island_rect = Rect::from_min_size(pos2((WIN_W - self.w.x) / 2.0, TOP), vec2(self.w.x, self.h.x));
         let hovered = dragging_files
@@ -936,11 +965,15 @@ impl eframe::App for Alex {
         if hovered {
             self.leave_since = None;
             self.hold_until = 0.0;
-            let since = *self.hover_since.get_or_insert(now);
-            if !self.expanded && now - since >= 0.12 {
-                self.expanded = true;
-            } else if !self.expanded {
-                ctx.request_repaint_after(Duration::from_millis(130));
+            if self.over_bar_btn {
+                self.hover_since = None;
+            } else {
+                let since = *self.hover_since.get_or_insert(now);
+                if !self.expanded && now - since >= 0.12 {
+                    self.expanded = true;
+                } else if !self.expanded {
+                    ctx.request_repaint_after(Duration::from_millis(130));
+                }
             }
         } else {
             self.hover_since = None;
@@ -1005,7 +1038,7 @@ impl eframe::App for Alex {
             EXPANDED
         } else if self.toast.is_some() {
             TOAST
-        } else if playing {
+        } else if playing || !self.data.tracks.is_empty() {
             COLLAPSED_MEDIA
         } else {
             COLLAPSED
@@ -1082,7 +1115,7 @@ impl eframe::App for Alex {
             self.expanded_ui(&mut child, now, media.as_ref());
         } else if !self.expanded || t_open < 0.2 {
             let alpha = if self.expanded { 1.0 - t_open / 0.2 } else { 1.0 };
-            self.collapsed_ui(&painter, rect, alpha * fade.max(0.85), media.as_ref(), now);
+            self.collapsed_ui(ui, rect, alpha * fade.max(0.85), media.as_ref(), now);
         }
         self.schedule(&ctx, now);
     }
@@ -1103,10 +1136,11 @@ impl Alex {
         ctx.request_repaint_after(Duration::from_secs_f64(next.max(0.01)));
     }
 
-    fn collapsed_ui(&self, p: &egui::Painter, rect: Rect, alpha: f32, media: Option<&MediaInfo>, now: f64) {
+    fn collapsed_ui(&mut self, ui: &mut Ui, rect: Rect, alpha: f32, media: Option<&MediaInfo>, now: f64) {
+        self.over_bar_btn = false;
+        let p = ui.painter().with_clip_rect(rect.shrink(2.0));
         let c = |col: Color32| col.gamma_multiply(alpha);
         let cy = rect.center().y;
-        let p = p.with_clip_rect(rect.shrink(2.0));
         logo::paint_mark(&p, Rect::from_center_size(pos2(rect.min.x + 22.0, cy), vec2(22.0, 22.0)), alpha);
 
         if let Some(t) = &self.toast {
@@ -1123,15 +1157,148 @@ impl Alex {
         let clock = format!("{:02}:{:02}", tm.hour, tm.minute);
         p.text(pos2(rect.max.x - 16.0, cy), Align2::RIGHT_CENTER, clock, bold(13.5), c(TEXT));
 
-        if let Some(m) = media.filter(|m| m.playing) {
-            // static equalizer bars + title
-            let x0 = rect.min.x + 44.0;
+        let show_bar = media.is_some_and(|m| m.playing) || !self.data.tracks.is_empty();
+        if !show_bar {
+            return;
+        }
+
+        let playing_ours = self.list_is_playing(media);
+        let play_at = pos2(rect.min.x + 52.0, cy);
+        if self.bar_hit(ui, &p, play_at, if playing_ours { "⏸" } else { "▶" }, c(TEXT), "isle_play") {
+            if self.data.tracks.is_empty() {
+                let _ = self.media_tx.send(MediaCmd::PlayPause);
+            } else {
+                self.play_saved(self.music_at, now);
+            }
+        }
+
+        if media.is_some_and(|m| m.playing) {
+            let x0 = rect.min.x + 72.0;
             for (i, h) in [7.0, 12.0, 9.0].iter().enumerate() {
                 let x = x0 + i as f32 * 4.5;
                 p.rect_filled(Rect::from_center_size(pos2(x, cy), vec2(2.5, *h)), 1.0, c(logo::grad(i as f32 / 2.0)));
             }
-            let title = truncate(&m.title, 26);
-            p.text(pos2(x0 + 16.0, cy), Align2::LEFT_CENTER, title, reg(12.5), c(TEXT));
+        }
+        let title = if let Some(m) = media.filter(|m| m.playing) {
+            m.title.as_str()
+        } else {
+            self.data.tracks.get(self.music_at).map(|t| t.title.as_str()).unwrap_or("")
+        };
+        p.text(pos2(rect.min.x + 92.0, cy), Align2::LEFT_CENTER, truncate(title, 22), reg(12.5), c(TEXT));
+
+        let show_heart = media.is_some() && (self.yt_now || media.is_some_and(|m| self.saved_title(&m.title)));
+        if show_heart {
+            let saved = media.is_some_and(|m| self.saved_title(&m.title));
+            let heart_at = pos2(rect.max.x - 72.0, cy);
+            if self.bar_hit(ui, &p, heart_at, if saved { "♥" } else { "♡" }, c(if saved { HEART } else { DIM }), "isle_heart") {
+                self.heart_current(now);
+            }
+        }
+    }
+
+    fn bar_hit(&mut self, ui: &mut Ui, p: &egui::Painter, center: Pos2, label: &str, color: Color32, id: &str) -> bool {
+        let r = Rect::from_center_size(center, vec2(26.0, 26.0));
+        let resp = ui.interact(r, ui.scope_id().with(id), Sense::click());
+        if resp.hovered() {
+            self.over_bar_btn = true;
+            p.circle_filled(center, 13.0, Color32::from_white_alpha(28));
+        }
+        p.text(center, Align2::CENTER_CENTER, label, bold(15.0), color);
+        resp.clicked()
+    }
+
+    fn list_is_playing(&self, media: Option<&MediaInfo>) -> bool {
+        let Some(id) = &self.playing_id else { return false };
+        let Some(track) = self.data.tracks.iter().find(|t| &t.id == id) else { return false };
+        media.is_some_and(|m| m.playing && music::same_title(&m.title, &track.title))
+    }
+
+    fn saved_title(&self, title: &str) -> bool {
+        self.data.tracks.iter().any(|t| music::same_title(&t.title, title))
+    }
+
+    fn poll_heart(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(rx) = self.heart_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(done) => match done.id {
+                Some(id) if self.data.tracks.iter().any(|t| t.id == id) => {
+                    self.toast(now, "Đã có trong list", &truncate(&done.title, 28));
+                }
+                Some(id) => {
+                    self.data.tracks.insert(0, Track { id, title: done.title.clone(), artist: done.artist });
+                    self.data.tracks.truncate(200);
+                    self.music_at = 0;
+                    self.data.save();
+                    self.toast(now, "Đã thêm vào list", &truncate(&done.title, 28));
+                }
+                None => self.toast(now, "Không đọc được link", "Để tab YouTube đang mở rồi tim lại"),
+            },
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                self.heart_rx = Some(rx);
+                ctx.request_repaint_after(Duration::from_millis(200));
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.toast(now, "Không đọc được link", "Để tab YouTube đang mở rồi tim lại");
+            }
+        }
+    }
+
+    fn heart_current(&mut self, now: f64) {
+        if self.heart_rx.is_some() {
+            return;
+        }
+        let Some(m) = self.media.lock().ok().and_then(|g| g.clone()) else {
+            self.toast(now, "Chưa có nhạc", "Mở YouTube rồi ấn tim");
+            return;
+        };
+        if !music::is_youtube(&m.title, &m.app) {
+            self.toast(now, "Không phải YouTube", "Hãy phát một video rồi tim");
+            return;
+        }
+        if self.saved_title(&m.title) {
+            self.toast(now, "Đã có trong list", &truncate(&m.title, 28));
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let title = m.title.clone();
+        let artist = m.artist.clone();
+        std::thread::spawn(move || {
+            let id = music::capture_id(&title);
+            let _ = tx.send(music::HeartDone { id, title, artist });
+        });
+        self.heart_rx = Some(rx);
+        self.ctx.request_repaint_after(Duration::from_millis(200));
+        self.toast(now, "Đang thêm vào list", "Đọc link YouTube…");
+    }
+
+    fn play_saved(&mut self, index: usize, now: f64) {
+        if self.data.tracks.is_empty() {
+            let _ = self.media_tx.send(MediaCmd::PlayPause);
+            return;
+        }
+        let index = index.min(self.data.tracks.len() - 1);
+        self.music_at = index;
+        let track = self.data.tracks[index].clone();
+        let same = self.playing_id.as_deref() == Some(track.id.as_str());
+        if same && self.player_pid.is_some_and(music::pid_alive) {
+            let _ = self.media_tx.send(MediaCmd::ToggleTitle(track.title.clone()));
+            return;
+        }
+        if let Some(pid) = self.player_pid.take() {
+            music::stop_pid(pid);
+        }
+        if let Some(m) = self.media.lock().ok().and_then(|g| g.clone()) {
+            if m.playing && music::is_youtube(&m.title, &m.app) {
+                let _ = self.media_tx.send(MediaCmd::PlayPause);
+            }
+        }
+        match music::open_player(&track.id) {
+            Ok(pid) => {
+                self.player_pid = Some(pid);
+                self.playing_id = Some(track.id);
+                self.toast(now, "Đang phát", &truncate(&track.title, 32));
+            }
+            Err(err) => self.toast(now, "Không phát được", &err),
         }
     }
 
@@ -1172,7 +1339,7 @@ impl Alex {
         ui.add_space(6.0);
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
-            Tab::Now => self.tab_now(ui, media),
+            Tab::Now => self.tab_now(ui, media, now),
             Tab::Clip => self.tab_clip(ui, now),
             Tab::Send => self.tab_send(ui),
             Tab::Notes => self.tab_notes(ui),
@@ -1182,7 +1349,7 @@ impl Alex {
         });
     }
 
-    fn tab_now(&mut self, ui: &mut Ui, media: Option<&MediaInfo>) {
+    fn tab_now(&mut self, ui: &mut Ui, media: Option<&MediaInfo>, now: f64) {
         const DAYS: [&str; 7] = ["Chủ nhật", "Thứ Hai", "Thứ Ba", "Thứ Tư", "Thứ Năm", "Thứ Sáu", "Thứ Bảy"];
         let t = sys::now();
         ui.horizontal(|ui| {
@@ -1243,13 +1410,71 @@ impl Alex {
                             if ui.add(btn("⏮")).clicked() {
                                 let _ = self.media_tx.send(MediaCmd::Prev);
                             }
+                            let saved = self.saved_title(&m.title);
+                            let heart = if saved { "♥" } else { "♡" };
+                            let heart_btn = egui::Button::new(RichText::new(heart).size(16.0).color(if saved { HEART } else { DIM }))
+                                .corner_radius(18)
+                                .min_size(vec2(36.0, 36.0));
+                            if ui.add(heart_btn).on_hover_text("Thêm YouTube vào list nhạc").clicked() {
+                                self.heart_current(now);
+                            }
                         });
                     });
                 }
                 None => {
                     ui.label(RichText::new("Không có nhạc đang phát").color(DIM));
-                    ui.label(RichText::new("Mở Spotify, YouTube hay Media Player, đảo sẽ hiện bài hát và nút điều khiển.").small().color(DIM));
+                    ui.label(RichText::new("Phát YouTube, rồi ấn ♥ để lưu. Play trên đảo mở trình phát, không cần vào trang.").small().color(DIM));
                 }
+            }
+        });
+        ui.add_space(6.0);
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("List nhạc").font(bold(14.0)));
+                ui.label(RichText::new(format!("{} bài", self.data.tracks.len())).small().color(DIM));
+            });
+            if self.data.tracks.is_empty() {
+                ui.label(RichText::new("Chưa có bài. Khi YouTube đang phát, ấn ♥ trên đảo.").color(DIM));
+            }
+            let mut play_at = None;
+            let mut remove_at = None;
+            for (i, t) in self.data.tracks.iter().enumerate() {
+                let on = self.playing_id.as_deref() == Some(t.id.as_str())
+                    && media.is_some_and(|m| m.playing && music::same_title(&m.title, &t.title));
+                ui.horizontal(|ui| {
+                    let mark = if on { "⏸" } else { "▶" };
+                    if ui.add(egui::Button::new(RichText::new(mark).size(14.0)).min_size(vec2(28.0, 28.0)).corner_radius(14)).clicked() {
+                        play_at = Some(i);
+                    }
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(truncate(&t.title, 46)).font(bold(13.0)));
+                        if !t.artist.is_empty() {
+                            ui.label(RichText::new(truncate(&t.artist, 46)).small().color(DIM));
+                        }
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button(RichText::new("✕").small()).on_hover_text("Bỏ khỏi list").clicked() {
+                            remove_at = Some(i);
+                        }
+                    });
+                });
+            }
+            if let Some(i) = play_at {
+                self.play_saved(i, now);
+            }
+            if let Some(i) = remove_at {
+                let id = self.data.tracks[i].id.clone();
+                self.data.tracks.remove(i);
+                if self.playing_id.as_deref() == Some(id.as_str()) {
+                    self.playing_id = None;
+                }
+                if self.music_at > i {
+                    self.music_at -= 1;
+                }
+                if self.music_at >= self.data.tracks.len() {
+                    self.music_at = 0;
+                }
+                self.data.save();
             }
         });
         ui.add_space(6.0);
